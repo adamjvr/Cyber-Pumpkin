@@ -8,6 +8,11 @@ pub struct BackendId(String);
 
 impl BackendId {
     /// Creates an identifier after validating that it is not blank.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::InvalidBackendId`] when the supplied identifier
+    /// contains no non-whitespace characters.
     pub fn new(value: impl Into<String>) -> Result<Self, CoreError> {
         let value = value.into();
         if value.trim().is_empty() {
@@ -29,6 +34,10 @@ pub struct BackendPath(String);
 
 impl BackendPath {
     /// Creates a backend path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::EmptyPath`] when the supplied path is empty.
     pub fn new(value: impl Into<String>) -> Result<Self, CoreError> {
         let value = value.into();
         if value.is_empty() {
@@ -70,17 +79,35 @@ pub struct FileEntry {
     pub size: Option<u64>,
 }
 
+/// Whether a backend explicitly supports an optional capability.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CapabilitySupport {
+    /// Capability is unavailable for this backend.
+    #[default]
+    Unsupported,
+    /// Capability is available for this backend.
+    Supported,
+}
+
+impl CapabilitySupport {
+    /// Returns `true` when the capability is supported.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
 /// Capabilities used to adapt behavior without backend-specific UI branching.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BackendCapabilities {
     /// Backend can seek/restart writes for resume.
-    pub resumable_write: bool,
+    pub resumable_write: CapabilitySupport,
     /// Backend can atomically rename an object into place.
-    pub atomic_rename: bool,
+    pub atomic_rename: CapabilitySupport,
     /// Backend exposes POSIX-like permissions.
-    pub unix_permissions: bool,
+    pub unix_permissions: CapabilitySupport,
     /// Backend can provide a server-side checksum.
-    pub server_checksum: bool,
+    pub server_checksum: CapabilitySupport,
 }
 
 /// Common core failures that are not protocol-specific.
@@ -105,7 +132,7 @@ impl std::error::Error for CoreError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendId, BackendPath};
+    use super::{BackendCapabilities, BackendId, BackendPath, CapabilitySupport};
 
     #[test]
     fn backend_id_rejects_blank_text() {
@@ -117,5 +144,12 @@ mod tests {
         let path = BackendPath::new("/var/www")?;
         assert_eq!(path.as_str(), "/var/www");
         Ok(())
+    }
+
+    #[test]
+    fn capabilities_default_to_unsupported() {
+        let capabilities = BackendCapabilities::default();
+        assert_eq!(capabilities.resumable_write, CapabilitySupport::Unsupported);
+        assert!(!capabilities.resumable_write.is_supported());
     }
 }

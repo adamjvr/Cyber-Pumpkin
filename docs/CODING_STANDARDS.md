@@ -66,3 +66,11 @@ Automation and instructions must not casually invoke destructive cleanup such as
 ## 9. Documentation
 
 A behavioral or architectural change is incomplete until the relevant document changes with it. Documentation is organized by purpose and must remain navigable from the root README.
+
+## Application workspace lockfile
+
+Cyber-Pumpkin is an application workspace, so the root `Cargo.lock` is committed. Milestones must never leave a regenerated lockfile untracked. Dependency changes include the corresponding lockfile change in the same commit.
+
+## Validation is fail-fast
+
+Repository validation is centralized in `scripts/verify.sh`. Release and milestone delivery scripts use `set -euo pipefail` and must stop before commit or push when formatting, linting, tests, smoke checks, or `git diff --check` fail. Do not bypass a failing gate to make a milestone appear complete.

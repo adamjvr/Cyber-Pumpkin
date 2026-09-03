@@ -9,6 +9,10 @@ pub struct TransferId(u64);
 
 impl TransferId {
     /// Creates a transfer id. Zero is reserved as invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError::InvalidId`] when `value` is zero.
     pub fn new(value: u64) -> Result<Self, TransferError> {
         if value == 0 {
             return Err(TransferError::InvalidId);
@@ -82,9 +86,15 @@ impl TransferState {
         };
         match self {
             Queued => matches!(next, Connecting | Cancelled),
-            Connecting => matches!(next, Enumerating | Transferring | RetryWaiting | Failed | Cancelled),
+            Connecting => matches!(
+                next,
+                Enumerating | Transferring | RetryWaiting | Failed | Cancelled
+            ),
             Enumerating => matches!(next, Transferring | RetryWaiting | Failed | Cancelled),
-            Transferring => matches!(next, Verifying | RetryWaiting | Paused | Completed | Failed | Cancelled),
+            Transferring => matches!(
+                next,
+                Verifying | RetryWaiting | Paused | Completed | Failed | Cancelled
+            ),
             Verifying => matches!(next, Completed | RetryWaiting | Failed | Cancelled),
             RetryWaiting => matches!(next, Connecting | Cancelled | Failed),
             Paused => matches!(next, Connecting | Transferring | Cancelled),
@@ -99,7 +109,12 @@ pub enum TransferError {
     /// Transfer id zero is invalid.
     InvalidId,
     /// Attempted transition violates the documented state machine.
-    InvalidTransition { from: TransferState, to: TransferState },
+    InvalidTransition {
+        /// State the job was in when the transition was requested.
+        from: TransferState,
+        /// Requested destination state.
+        to: TransferState,
+    },
 }
 
 impl fmt::Display for TransferError {
@@ -127,7 +142,11 @@ impl TransferJob {
     /// Creates a queued job.
     #[must_use]
     pub const fn new(id: TransferId, spec: TransferSpec) -> Self {
-        Self { id, spec, state: TransferState::Queued }
+        Self {
+            id,
+            spec,
+            state: TransferState::Queued,
+        }
     }
 
     /// Job identifier.
@@ -149,9 +168,17 @@ impl TransferJob {
     }
 
     /// Applies a validated state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransferError::InvalidTransition`] when `next` is not a legal
+    /// successor of the current state.
     pub fn transition(&mut self, next: TransferState) -> Result<(), TransferError> {
         if !self.state.can_transition_to(next) {
-            return Err(TransferError::InvalidTransition { from: self.state, to: next });
+            return Err(TransferError::InvalidTransition {
+                from: self.state,
+                to: next,
+            });
         }
         self.state = next;
         Ok(())
@@ -181,7 +208,11 @@ mod tests {
 
     #[test]
     fn terminal_states_never_transition() {
-        for state in [TransferState::Completed, TransferState::Failed, TransferState::Cancelled] {
+        for state in [
+            TransferState::Completed,
+            TransferState::Failed,
+            TransferState::Cancelled,
+        ] {
             assert!(!state.can_transition_to(TransferState::Queued));
         }
     }

@@ -47,3 +47,13 @@ Behavioral fixtures are shared. Native shells additionally test platform interac
 ## Performance
 
 Benchmarks measure throughput, CPU, memory, enumeration latency, cancellation latency, and scaling across worker counts. Performance changes never weaken correctness invariants just to improve a benchmark.
+
+## Canonical local verification
+
+Run the repository-owned verifier before every milestone commit:
+
+```bash
+./scripts/verify.sh
+```
+
+The verifier is intentionally fail-fast. A non-zero result means the milestone is not eligible to commit or push.
