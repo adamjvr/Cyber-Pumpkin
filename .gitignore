@@ -1,0 +1,11 @@
+/target/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.xcuserstate
+DerivedData/
+.build/
+build/
+*.log
