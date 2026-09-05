@@ -2,34 +2,49 @@
 
 Testing is layered around behavior and invariants, not implementation trivia.
 
-## Required gates
+## Required gate
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+./scripts/verify.sh
 ```
 
-## Test families
+The verifier runs formatting, strict Clippy, all workspace tests, CLI smoke tests, and diff checks. It is fail-fast; a non-zero result means the milestone is not eligible to commit or push.
 
-### Unit
+## Phase 1A automated coverage
 
-- domain validation
-- capability decisions
+- backend/domain validation
+- local list/stat behavior
 - transfer state machine
-- retry/backoff math
-- path handling
-- conflict policy
+- local regular-file copy through the real backend contract
+- destination-size verification path
+- SFTP configuration validation without requiring network access
+- local CLI browse/stat smoke tests
 
-### Contract
+## SFTP live test
 
-Every backend must pass the same filesystem contract suite: list/stat/read/write/rename/delete, errors, Unicode names, empty files, large files, timestamps, cancellation, and declared capabilities.
+Network tests are opt-in because normal CI must not depend on a private SSH server or user credentials.
 
-### Integration
+```bash
+export CPK_SFTP_HOST=server.example.com
+export CPK_SFTP_USER=adam
+export CPK_SFTP_LIST_PATH=/tmp
+./scripts/test-sftp-live.sh
+```
 
-Containerized or disposable servers for SFTP/FTP/WebDAV/S3-compatible testing. Tests must control server versions and configuration.
+For a writable round trip:
 
-### Fault injection
+```bash
+export CPK_SFTP_ROUNDTRIP_DIR=/tmp
+./scripts/test-sftp-live.sh
+```
+
+The live harness lists the server, uploads a unique temporary object, downloads it, verifies exact bytes with `cmp`, and removes the remote test object. It uses the user's SSH agent and existing `known_hosts` file.
+
+## Contract suite target
+
+Every backend must eventually pass the same filesystem contract suite: list/stat/read/write/rename/delete, errors, Unicode names, empty files, large files, timestamps, cancellation, and declared capabilities.
+
+## Fault injection target
 
 - disconnect during upload/download
 - short read/write
@@ -40,20 +55,10 @@ Containerized or disposable servers for SFTP/FTP/WebDAV/S3-compatible testing. T
 - server restart
 - cancellation at every lifecycle phase
 
-### Cross-platform
+## Cross-platform
 
 Behavioral fixtures are shared. Native shells additionally test platform interactions, drag/drop, keyboard navigation, secret storage, and lifecycle behavior.
 
 ## Performance
 
 Benchmarks measure throughput, CPU, memory, enumeration latency, cancellation latency, and scaling across worker counts. Performance changes never weaken correctness invariants just to improve a benchmark.
-
-## Canonical local verification
-
-Run the repository-owned verifier before every milestone commit:
-
-```bash
-./scripts/verify.sh
-```
-
-The verifier is intentionally fail-fast. A non-zero result means the milestone is not eligible to commit or push.

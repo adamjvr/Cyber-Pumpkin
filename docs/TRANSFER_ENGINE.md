@@ -18,11 +18,26 @@ Connecting / Enumerating / Transferring / Verifying
   -> Cancelled
 
 Transferring -> Paused -> Connecting or Transferring
+Paused -> Failed when an underlying operation becomes unrecoverable
 ```
 
 Terminal states never transition.
 
-## Correctness rules
+## Phase 1A executor
+
+`execute_file` is the first actual executor behind the lifecycle contract. It is deliberately synchronous and single-file so correctness is established before queue concurrency is introduced.
+
+Current invariants:
+
+- backend identifiers must match the immutable transfer specification;
+- source must be a regular file;
+- bytes stream through `Read`/`Write` handles rather than a whole-file buffer;
+- destination is flushed before verification;
+- destination size must equal bytes copied when the backend reports size;
+- any post-start execution error moves the lifecycle to `Failed`;
+- success ends in `Completed`.
+
+## Correctness rules for later Phase 1
 
 1. Never expose a partial write under the final destination name when an atomic staging strategy is available.
 2. Completion means all required data, metadata, and verification policy succeeded.
@@ -34,7 +49,7 @@ Terminal states never transition.
 
 ## Concurrency
 
-Concurrency is controlled at multiple levels:
+Concurrency is intentionally **not** part of Phase 1A. It will be controlled at multiple levels:
 
 - global worker limit
 - per-backend/host connection limit
@@ -45,7 +60,7 @@ Defaults favor responsiveness and server politeness rather than synthetic benchm
 
 ## Verification
 
-Verification policy is configurable by backend capability:
+Phase 1A performs destination-size verification. Later policy can select:
 
 - size + metadata baseline
 - local checksum when appropriate

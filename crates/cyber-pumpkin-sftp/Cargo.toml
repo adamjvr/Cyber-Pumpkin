@@ -1,5 +1,5 @@
 [package]
-name = "cpk"
+name = "cyber-pumpkin-sftp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,7 @@ rust-version.workspace = true
 [dependencies]
 cyber-pumpkin-backend = { path = "../cyber-pumpkin-backend" }
 cyber-pumpkin-core = { path = "../cyber-pumpkin-core" }
-cyber-pumpkin-local = { path = "../cyber-pumpkin-local" }
-cyber-pumpkin-sftp = { path = "../cyber-pumpkin-sftp" }
-cyber-pumpkin-transfer = { path = "../cyber-pumpkin-transfer" }
+ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 
 [lints]
 workspace = true

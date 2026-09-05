@@ -1,6 +1,9 @@
 [workspace]
 members = [
   "crates/cyber-pumpkin-core",
+  "crates/cyber-pumpkin-backend",
+  "crates/cyber-pumpkin-local",
+  "crates/cyber-pumpkin-sftp",
   "crates/cyber-pumpkin-transfer",
   "crates/cpk",
 ]
