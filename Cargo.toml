@@ -1,11 +1,11 @@
 [workspace]
 members = [
-  "crates/cyber-pumpkin-core",
-  "crates/cyber-pumpkin-backend",
-  "crates/cyber-pumpkin-local",
-  "crates/cyber-pumpkin-sftp",
-  "crates/cyber-pumpkin-transfer",
-  "crates/cpk",
+  "sdk/foundation/cyber-pumpkin-core",
+  "sdk/filesystem/cyber-pumpkin-backend",
+  "sdk/filesystem/cyber-pumpkin-local",
+  "sdk/ssh/cyber-pumpkin-sftp",
+  "sdk/transfer/cyber-pumpkin-transfer",
+  "tools/cpk",
 ]
 resolver = "2"
 

@@ -6,8 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-cyber-pumpkin-backend = { path = "../cyber-pumpkin-backend" }
-cyber-pumpkin-core = { path = "../cyber-pumpkin-core" }
+cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
+cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 
 [lints]

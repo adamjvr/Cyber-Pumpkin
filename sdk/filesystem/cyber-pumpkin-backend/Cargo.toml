@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-cyber-pumpkin-core = { path = "../cyber-pumpkin-core" }
+cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
 
 [lints]
 workspace = true

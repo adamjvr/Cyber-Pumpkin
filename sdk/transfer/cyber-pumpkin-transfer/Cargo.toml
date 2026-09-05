@@ -1,0 +1,16 @@
+[package]
+name = "cyber-pumpkin-transfer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
+cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
+
+[dev-dependencies]
+cyber-pumpkin-local = { path = "../../filesystem/cyber-pumpkin-local" }
+
+[lints]
+workspace = true
