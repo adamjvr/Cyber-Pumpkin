@@ -5,7 +5,7 @@ members = [
   "sdk/filesystem/cyber-pumpkin-local",
   "sdk/ssh/cyber-pumpkin-sftp",
   "sdk/transfer/cyber-pumpkin-transfer",
-  "tools/cpk",
+  "tools/cpk", "apps/cyber-pumpkin/linux",
 ]
 resolver = "2"
 
