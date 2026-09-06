@@ -75,6 +75,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cyber-pumpkin-application"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-core",
+]
+
+[[package]]
 name = "cyber-pumpkin-backend"
 version = "0.1.0"
 dependencies = [
@@ -89,6 +96,7 @@ version = "0.1.0"
 name = "cyber-pumpkin-linux"
 version = "0.1.0"
 dependencies = [
+ "cyber-pumpkin-application",
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",

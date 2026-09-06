@@ -3,9 +3,11 @@ members = [
   "sdk/foundation/cyber-pumpkin-core",
   "sdk/filesystem/cyber-pumpkin-backend",
   "sdk/filesystem/cyber-pumpkin-local",
+  "sdk/application/cyber-pumpkin-application",
   "sdk/ssh/cyber-pumpkin-sftp",
   "sdk/transfer/cyber-pumpkin-transfer",
-  "tools/cpk", "apps/cyber-pumpkin/linux",
+  "tools/cpk",
+  "apps/cyber-pumpkin/linux",
 ]
 resolver = "2"
 

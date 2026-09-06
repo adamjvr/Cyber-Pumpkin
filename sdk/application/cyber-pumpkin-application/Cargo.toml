@@ -1,0 +1,14 @@
+[package]
+name = "cyber-pumpkin-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+cyber-pumpkin-core = { version = "0.1.0", path = "../../foundation/cyber-pumpkin-core" }
+
+[lints]
+workspace = true
