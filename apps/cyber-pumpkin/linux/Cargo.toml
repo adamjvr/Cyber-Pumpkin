@@ -13,6 +13,7 @@ cyber-pumpkin-application = { version = "0.1.0", path = "../../../sdk/applicatio
 cyber-pumpkin-backend = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { version = "0.1.0", path = "../../../sdk/foundation/cyber-pumpkin-core" }
 cyber-pumpkin-local = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-local" }
+cyber-pumpkin-transfer = { version = "0.1.0", path = "../../../sdk/transfer/cyber-pumpkin-transfer" }
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_6"] }
 
 [lints]

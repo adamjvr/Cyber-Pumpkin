@@ -100,6 +100,7 @@ dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
+ "cyber-pumpkin-transfer",
  "gtk4",
  "libadwaita",
 ]

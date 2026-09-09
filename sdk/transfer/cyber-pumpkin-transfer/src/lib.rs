@@ -1,6 +1,6 @@
 //! Transfer planning, lifecycle state, and first file-copy executor.
 
-use cyber_pumpkin_backend::{Backend, BackendError};
+use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind};
 use std::fmt;
 use std::io::{self, Write as _};
@@ -45,6 +45,16 @@ pub struct TransferSpec {
     pub source: Endpoint,
     /// Destination object.
     pub destination: Endpoint,
+}
+
+/// Policy used when the destination path already exists.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DestinationPolicy {
+    /// Replace the destination using the backend's normal write semantics.
+    #[default]
+    Replace,
+    /// Refuse to start when the destination is already present.
+    FailIfExists,
 }
 
 /// Observable lifecycle state. UI and CLI render this state; they do not invent it.
@@ -222,6 +232,11 @@ pub enum ExecutionError {
         /// Entry type reported by the source backend.
         kind: EntryKind,
     },
+    /// The requested destination already exists and replacement was disabled.
+    DestinationExists {
+        /// Existing destination path.
+        path: BackendPath,
+    },
     /// Streaming bytes between opened backend handles failed.
     Stream(String),
     /// Destination size did not match the number of bytes copied.
@@ -250,6 +265,9 @@ impl fmt::Display for ExecutionError {
             ),
             Self::SourceNotFile { kind } => {
                 write!(f, "source endpoint is not a regular file: {kind:?}")
+            }
+            Self::DestinationExists { path } => {
+                write!(f, "destination already exists: {}", path.as_str())
             }
             Self::Stream(message) => write!(f, "streaming copy failed: {message}"),
             Self::SizeMismatch {
@@ -293,6 +311,26 @@ pub fn execute_file(
     source: &dyn Backend,
     destination: &dyn Backend,
 ) -> Result<TransferReport, ExecutionError> {
+    execute_file_with_policy(job, source, destination, DestinationPolicy::Replace)
+}
+
+/// Executes one regular-file copy with an explicit destination policy.
+///
+/// `FailIfExists` performs a backend metadata preflight before opening the
+/// destination for writing. This prevents known accidental replacement but is
+/// not an atomic create-if-absent primitive; stronger guarantees belong in
+/// backend capabilities added by a later reliability milestone.
+///
+/// # Errors
+///
+/// Returns [`ExecutionError`] for lifecycle, backend, streaming, verification,
+/// or destination-policy failures.
+pub fn execute_file_with_policy(
+    job: &mut TransferJob,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    policy: DestinationPolicy,
+) -> Result<TransferReport, ExecutionError> {
     validate_backend("source", &job.spec.source.backend, source.id())?;
     validate_backend(
         "destination",
@@ -301,7 +339,7 @@ pub fn execute_file(
     )?;
 
     job.transition(TransferState::Connecting)?;
-    let result = execute_started(job, source, destination);
+    let result = execute_started(job, source, destination, policy);
 
     if result.is_err() && job.state().can_transition_to(TransferState::Failed) {
         job.transition(TransferState::Failed)?;
@@ -326,10 +364,29 @@ fn validate_backend(
     }
 }
 
+fn enforce_destination_policy(
+    job: &TransferJob,
+    destination: &dyn Backend,
+    policy: DestinationPolicy,
+) -> Result<(), ExecutionError> {
+    if policy == DestinationPolicy::Replace {
+        return Ok(());
+    }
+
+    match destination.stat(&job.spec.destination.path) {
+        Ok(_) => Err(ExecutionError::DestinationExists {
+            path: job.spec.destination.path.clone(),
+        }),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn execute_started(
     job: &mut TransferJob,
     source: &dyn Backend,
     destination: &dyn Backend,
+    policy: DestinationPolicy,
 ) -> Result<TransferReport, ExecutionError> {
     let source_entry = source.stat(&job.spec.source.path)?;
     if source_entry.kind != EntryKind::File {
@@ -337,6 +394,8 @@ fn execute_started(
             kind: source_entry.kind,
         });
     }
+
+    enforce_destination_policy(job, destination, policy)?;
 
     let mut reader = source.open_read(&job.spec.source.path)?;
     let mut writer = destination.open_write(&job.spec.destination.path)?;
@@ -367,7 +426,10 @@ fn execute_started(
 
 #[cfg(test)]
 mod tests {
-    use super::{Endpoint, TransferId, TransferJob, TransferSpec, TransferState, execute_file};
+    use super::{
+        DestinationPolicy, Endpoint, ExecutionError, TransferId, TransferJob, TransferSpec,
+        TransferState, execute_file, execute_file_with_policy,
+    };
     use cyber_pumpkin_core::{BackendId, BackendPath};
     use cyber_pumpkin_local::LocalBackend;
     use std::fs;
@@ -433,6 +495,46 @@ mod tests {
     fn illegal_transition_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let mut job = job()?;
         assert!(job.transition(TransferState::Completed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn fail_if_exists_preserves_existing_destination() -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_directory();
+        fs::create_dir(&root)?;
+        let source_path = root.join("source.bin");
+        let destination_path = root.join("destination.bin");
+        fs::write(&source_path, b"new-content")?;
+        fs::write(&destination_path, b"keep-content")?;
+
+        let backend_id = BackendId::new("local")?;
+        let backend = LocalBackend::new(backend_id.clone());
+        let spec = TransferSpec {
+            source: Endpoint {
+                backend: backend_id.clone(),
+                path: backend_path(&source_path)?,
+            },
+            destination: Endpoint {
+                backend: backend_id,
+                path: backend_path(&destination_path)?,
+            },
+        };
+        let mut transfer = TransferJob::new(TransferId::new(1)?, spec);
+        let result = execute_file_with_policy(
+            &mut transfer,
+            &backend,
+            &backend,
+            DestinationPolicy::FailIfExists,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExecutionError::DestinationExists { .. })
+        ));
+        assert_eq!(transfer.state(), TransferState::Failed);
+        assert_eq!(fs::read(&destination_path)?, b"keep-content");
+
+        fs::remove_dir_all(&root)?;
         Ok(())
     }
 
