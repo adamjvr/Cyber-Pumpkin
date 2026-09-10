@@ -1,0 +1,34 @@
+name: Native Builds
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux GTK
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev pkg-config
+      - name: Verify Linux and shared Rust
+        run: ./scripts/verify.sh
+      - name: Build Linux app
+        run: cargo build -p cyber-pumpkin-linux
+
+  macos:
+    name: macOS AppKit
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust companion
+        run: cargo build -p cpk
+      - name: Test shared Rust used by macOS
+        run: cargo test -p cyber-pumpkin-core -p cyber-pumpkin-backend -p cyber-pumpkin-local -p cyber-pumpkin-application -p cyber-pumpkin-transfer -p cpk
+      - name: Build native AppKit shell
+        run: swift build --package-path apps/cyber-pumpkin/macos

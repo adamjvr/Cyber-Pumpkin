@@ -1,5 +1,22 @@
-# macOS Platform Shell
+# Cyber-Pumpkin macOS
 
-Target: native macOS application using AppKit for dense desktop file-browser interactions and SwiftUI where it improves composition.
+Native AppKit frontend.
 
-The shell will consume shared core commands/state through a stable FFI layer. It does not own protocol or transfer behavior.
+Major GUI Pass 1 uses `cpk` as a temporary process boundary for local filesystem
+enumeration, so filesystem behavior remains in the shared Rust backend instead
+of being reimplemented in Swift. The AppKit side owns presentation only.
+
+Build from the repository root on macOS:
+
+```sh
+./scripts/build-native.sh
+```
+
+Run:
+
+```sh
+./scripts/run-macos.sh
+```
+
+The exact Transmit-style menu hierarchy is intentionally provisional until the
+clean-room screenshot inventory is captured.
