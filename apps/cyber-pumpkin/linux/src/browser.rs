@@ -123,6 +123,60 @@ impl PaneHandle {
         }
     }
 
+    pub(crate) fn rename_selected(&self, new_name: &str) {
+        if new_name.is_empty() || new_name.contains('/') {
+            self.widgets.footer.set_text("Name is invalid.");
+            return;
+        }
+        let Some(entry) = self.selected_entry() else {
+            self.widgets.footer.set_text("Select an item to rename.");
+            return;
+        };
+        let Ok(destination) = self.destination_child(new_name) else {
+            self.widgets
+                .footer
+                .set_text("Could not form destination path.");
+            return;
+        };
+        let backend = LocalBackend::new(self.backend_id());
+        match backend.rename(&entry.path, &destination) {
+            Ok(()) => {
+                self.widgets
+                    .footer
+                    .set_text(&format!("Renamed {} → {new_name}", entry.name));
+                self.refresh();
+            }
+            Err(error) => self
+                .widgets
+                .footer
+                .set_text(&format!("Rename failed: {error}")),
+        }
+    }
+
+    pub(crate) fn delete_selected(&self) {
+        let Some(entry) = self.selected_entry() else {
+            self.widgets.footer.set_text("Select an item to delete.");
+            return;
+        };
+        let backend = LocalBackend::new(self.backend_id());
+        match backend.remove(&entry.path) {
+            Ok(()) => {
+                self.widgets
+                    .footer
+                    .set_text(&format!("Deleted {}", entry.name));
+                self.refresh();
+            }
+            Err(error) => self
+                .widgets
+                .footer
+                .set_text(&format!("Delete failed: {error}")),
+        }
+    }
+
+    pub(crate) fn selected_name(&self) -> Option<String> {
+        self.selected_entry().map(|entry| entry.name)
+    }
+
     fn connect_navigation(&self, side: PaneSide, active: &Rc<Cell<PaneSide>>) {
         self.connect_row_activation(side, active);
         self.connect_path_entry(side, active);

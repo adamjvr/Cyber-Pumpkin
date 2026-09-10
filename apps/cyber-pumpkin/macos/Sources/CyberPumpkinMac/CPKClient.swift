@@ -70,6 +70,23 @@ final class CPKClient {
         }
     }
 
+
+    func createDirectory(path: String) throws {
+        _ = try run(["local-mkdir", path])
+    }
+
+    func rename(source: String, destination: String) throws {
+        _ = try run(["local-rename", source, destination])
+    }
+
+    func remove(path: String) throws {
+        _ = try run(["local-rm", path])
+    }
+
+    func copySafe(source: String, destination: String) throws {
+        _ = try run(["local-copy-safe", source, destination])
+    }
+
     private func run(_ arguments: [String]) throws -> Data {
         let process = Process()
         process.executableURL = binary

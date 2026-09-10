@@ -1,6 +1,7 @@
 import AppKit
 
 final class BrowserWindowController: NSObject {
+    private let client: CPKClient
     private let window: NSWindow
     private let left: PaneViewController
     private let right: PaneViewController
@@ -9,6 +10,7 @@ final class BrowserWindowController: NSObject {
     private let activity = NSTextField(labelWithString: "No transfer activity yet.")
 
     init(client: CPKClient) {
+        self.client = client
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let leftPane = PaneViewController(title: "Local A", path: home, client: client)
         let rightPane = PaneViewController(title: "Local B", path: home, client: client)
@@ -42,57 +44,161 @@ final class BrowserWindowController: NSObject {
 
     func installMainMenu() {
         let main = NSMenu()
+        main.addItem(appMenuItem())
+        main.addItem(fileMenuItem())
+        main.addItem(viewMenuItem())
+        main.addItem(goMenuItem())
+        main.addItem(transferMenuItem())
+        main.addItem(helpMenuItem())
+        NSApp.mainMenu = main
+    }
 
-        let appItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(
+    private func appMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu()
+
+        menu.addItem(
             withTitle: "About Cyber-Pumpkin",
             action: #selector(showAbout),
             keyEquivalent: ""
         )
-        appMenu.addItem(.separator())
-        appMenu.addItem(
+        menu.addItem(.separator())
+        menu.addItem(
             withTitle: "Quit Cyber-Pumpkin",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
-        appItem.submenu = appMenu
-        main.addItem(appItem)
+        item.submenu = menu
+        return item
+    }
 
-        let fileItem = NSMenuItem()
-        fileItem.title = "File"
-        let fileMenu = NSMenu(title: "File")
-        let refresh = NSMenuItem(
-            title: "Refresh",
-            action: #selector(refreshActive),
-            keyEquivalent: "r"
-        )
-        refresh.target = self
-        fileMenu.addItem(refresh)
-        fileItem.submenu = fileMenu
-        main.addItem(fileItem)
+    private func fileMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "File"
+        let menu = NSMenu(title: "File")
 
-        let viewItem = NSMenuItem()
-        viewItem.title = "View"
-        let viewMenu = NSMenu(title: "View")
-        let hidden = NSMenuItem(
-            title: "Show Hidden Files",
-            action: #selector(toggleHiddenMenu(_:)),
-            keyEquivalent: "."
-        )
-        hidden.target = self
-        viewMenu.addItem(hidden)
-        let activityItem = NSMenuItem(
-            title: "Show Activity",
-            action: #selector(toggleActivityMenu(_:)),
-            keyEquivalent: ""
-        )
-        activityItem.target = self
-        viewMenu.addItem(activityItem)
-        viewItem.submenu = viewMenu
-        main.addItem(viewItem)
+        addTargetedItem(menu, "New Folder…", #selector(newFolder), "n", [.command, .shift])
+        addTargetedItem(menu, "Rename…", #selector(renameSelected), "\r", [])
+        addTargetedItem(menu, "Delete…", #selector(deleteSelected), "\u{8}", [])
+        menu.addItem(.separator())
+        addTargetedItem(menu, "Refresh", #selector(refreshActive), "r", [.command])
 
-        NSApp.mainMenu = main
+        item.submenu = menu
+        return item
+    }
+
+    private func viewMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "View"
+        let menu = NSMenu(title: "View")
+
+        addTargetedItem(
+            menu,
+            "Show Hidden Files",
+            #selector(toggleHiddenMenu(_:)),
+            ".",
+            [.command]
+        )
+        addTargetedItem(
+            menu,
+            "Show Activity",
+            #selector(toggleActivityMenu(_:)),
+            "",
+            []
+        )
+
+        item.submenu = menu
+        return item
+    }
+
+    private func goMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "Go"
+        let menu = NSMenu(title: "Go")
+
+        addPlaceItem(menu, "Home", FileManager.default.homeDirectoryForCurrentUser.path)
+        addPlaceItem(
+            menu,
+            "Desktop",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Desktop")
+                .path
+        )
+        addPlaceItem(
+            menu,
+            "Documents",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Documents")
+                .path
+        )
+        addPlaceItem(
+            menu,
+            "Downloads",
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Downloads")
+                .path
+        )
+        addPlaceItem(menu, "Root", "/")
+
+        item.submenu = menu
+        return item
+    }
+
+    private func transferMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "Transfer"
+        let menu = NSMenu(title: "Transfer")
+        addTargetedItem(
+            menu,
+            "Copy to Other Pane",
+            #selector(copyToOtherPane),
+            "",
+            []
+        )
+        item.submenu = menu
+        return item
+    }
+
+    private func helpMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "Help"
+        let menu = NSMenu(title: "Help")
+        addTargetedItem(
+            menu,
+            "About Cyber-Pumpkin",
+            #selector(showAbout),
+            "",
+            []
+        )
+        item.submenu = menu
+        return item
+    }
+
+    private func addTargetedItem(
+        _ menu: NSMenu,
+        _ title: String,
+        _ action: Selector,
+        _ keyEquivalent: String,
+        _ modifiers: NSEvent.ModifierFlags
+    ) {
+        let item = NSMenuItem(
+            title: title,
+            action: action,
+            keyEquivalent: keyEquivalent
+        )
+        item.target = self
+        item.keyEquivalentModifierMask = modifiers
+        menu.addItem(item)
+    }
+
+    private func addPlaceItem(_ menu: NSMenu, _ title: String, _ path: String) {
+        let item = PlaceMenuItem(
+            title: title,
+            path: path,
+            target: self,
+            action: #selector(openPlaceMenu(_:))
+        )
+        menu.addItem(item)
     }
 
     private func configureWindow() {
@@ -137,6 +243,31 @@ final class BrowserWindowController: NSObject {
             target: self,
             action: #selector(refreshActive)
         )
+        let newFolder = NSButton(
+            title: "New Folder",
+            target: self,
+            action: #selector(newFolder)
+        )
+        let rename = NSButton(
+            title: "Rename",
+            target: self,
+            action: #selector(renameSelected)
+        )
+        let delete = NSButton(
+            title: "Delete",
+            target: self,
+            action: #selector(deleteSelected)
+        )
+        let copyLeft = NSButton(
+            title: "← Copy",
+            target: self,
+            action: #selector(copyRightToLeft)
+        )
+        let copyRight = NSButton(
+            title: "Copy →",
+            target: self,
+            action: #selector(copyLeftToRight)
+        )
         let hidden = NSButton(
             checkboxWithTitle: "Hidden",
             target: self,
@@ -149,7 +280,10 @@ final class BrowserWindowController: NSObject {
         )
 
         status.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [refresh, hidden, activityButton, status])
+        let stack = NSStackView(views: [
+            refresh, newFolder, rename, delete,
+            copyLeft, copyRight, hidden, activityButton, status
+        ])
         stack.orientation = .horizontal
         stack.spacing = 6
         status.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -193,9 +327,133 @@ final class BrowserWindowController: NSObject {
         activePane.navigate(to: sender.path)
     }
 
+    @objc private func openPlaceMenu(_ sender: PlaceMenuItem) {
+        activePane.navigate(to: sender.path)
+    }
+
     @objc private func refreshActive() {
         activePane.reloadDirectory()
         status.stringValue = "Refreshed \(activePane.currentPath)"
+    }
+
+    @objc private func newFolder() {
+        guard let name = prompt(
+            title: "New Folder",
+            message: "Create a folder in \(activePane.currentPath)",
+            initial: ""
+        ) else { return }
+
+        guard !name.isEmpty, !name.contains("/") else { return }
+        let path = URL(fileURLWithPath: activePane.currentPath)
+            .appendingPathComponent(name)
+            .path
+
+        do {
+            try client.createDirectory(path: path)
+            activePane.reloadDirectory()
+            status.stringValue = "Created \(name)"
+        } catch {
+            status.stringValue = "Create failed: \(error.localizedDescription)"
+        }
+    }
+
+    @objc private func renameSelected() {
+        guard let entry = activePane.selectedEntry() else {
+            status.stringValue = "Select an item to rename."
+            return
+        }
+        guard let name = prompt(
+            title: "Rename",
+            message: "Rename \(entry.name)",
+            initial: entry.name
+        ) else { return }
+
+        guard !name.isEmpty, !name.contains("/") else { return }
+        let destination = URL(fileURLWithPath: activePane.currentPath)
+            .appendingPathComponent(name)
+            .path
+
+        do {
+            try client.rename(source: entry.path, destination: destination)
+            activePane.reloadDirectory()
+            status.stringValue = "Renamed \(entry.name) → \(name)"
+        } catch {
+            status.stringValue = "Rename failed: \(error.localizedDescription)"
+        }
+    }
+
+    @objc private func deleteSelected() {
+        guard let entry = activePane.selectedEntry() else {
+            status.stringValue = "Select an item to delete."
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Delete \(entry.name)?"
+        alert.informativeText = "Non-empty folders are not removed recursively yet."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try client.remove(path: entry.path)
+            activePane.reloadDirectory()
+            status.stringValue = "Deleted \(entry.name)"
+        } catch {
+            status.stringValue = "Delete failed: \(error.localizedDescription)"
+        }
+    }
+
+    @objc private func copyLeftToRight() {
+        copy(source: left, destination: right)
+    }
+
+    @objc private func copyRightToLeft() {
+        copy(source: right, destination: left)
+    }
+
+    @objc private func copyToOtherPane() {
+        copy(
+            source: activePane,
+            destination: activePane === left ? right : left
+        )
+    }
+
+    private func copy(
+        source: PaneViewController,
+        destination: PaneViewController
+    ) {
+        guard let entry = source.selectedEntry(), !entry.isDirectory else {
+            status.stringValue = "Select a regular file to copy."
+            return
+        }
+
+        let destinationPath = URL(fileURLWithPath: destination.currentPath)
+            .appendingPathComponent(entry.name)
+            .path
+        status.stringValue = "Copying \(entry.name)…"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result {
+                try self.client.copySafe(
+                    source: entry.path,
+                    destination: destinationPath
+                )
+            }
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    self.status.stringValue = "Copied \(entry.name)"
+                    self.activity.stringValue = "Completed • Copy \(entry.name)"
+                    destination.reloadDirectory()
+                case .failure(let error):
+                    self.status.stringValue =
+                        "Copy failed: \(error.localizedDescription)"
+                    self.activity.stringValue = "Failed • Copy \(entry.name)"
+                }
+            }
+        }
     }
 
     @objc private func toggleHiddenButton(_ sender: NSButton) {
@@ -223,6 +481,26 @@ final class BrowserWindowController: NSObject {
         activity.isHidden = !next
     }
 
+    private func prompt(
+        title: String,
+        message: String,
+        initial: String
+    ) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+
+        let field = NSTextField(string: initial)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        field.selectText(nil)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return field.stringValue
+    }
+
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(nil)
     }
@@ -231,7 +509,12 @@ final class BrowserWindowController: NSObject {
 final class PlaceButton: NSButton {
     let path: String
 
-    init(title: String, path: String, target: AnyObject?, action: Selector?) {
+    init(
+        title: String,
+        path: String,
+        target: AnyObject?,
+        action: Selector?
+    ) {
         self.path = path
         super.init(frame: .zero)
         self.title = title
@@ -241,6 +524,30 @@ final class PlaceButton: NSButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+}
+
+final class PlaceMenuItem: NSMenuItem {
+    let path: String
+
+    init(
+        title: String,
+        path: String,
+        target: AnyObject?,
+        action: Selector?
+    ) {
+        self.path = path
+        super.init(
+            title: title,
+            action: action,
+            keyEquivalent: ""
+        )
+        self.target = target
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
     }
 }
