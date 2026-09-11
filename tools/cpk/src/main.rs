@@ -55,6 +55,28 @@ fn run() -> Result<(), Box<dyn Error>> {
             ensure_finished(&mut args)?;
             local_copy(&source, &destination)?;
         }
+        Some("local-copy-safe") => {
+            let source = next_arg(&mut args, "source")?;
+            let destination = next_arg(&mut args, "destination")?;
+            ensure_finished(&mut args)?;
+            local_copy_safe(&source, &destination)?;
+        }
+        Some("local-mkdir") => {
+            let path = next_arg(&mut args, "path")?;
+            ensure_finished(&mut args)?;
+            local_mkdir(&path)?;
+        }
+        Some("local-rename") => {
+            let source = next_arg(&mut args, "source")?;
+            let destination = next_arg(&mut args, "destination")?;
+            ensure_finished(&mut args)?;
+            local_rename(&source, &destination)?;
+        }
+        Some("local-rm") => {
+            let path = next_arg(&mut args, "path")?;
+            ensure_finished(&mut args)?;
+            local_remove(&path)?;
+        }
         Some("sftp-ls") => {
             let host = next_arg(&mut args, "host")?;
             let username = next_arg(&mut args, "username")?;
@@ -176,6 +198,51 @@ fn local_copy(source: &str, destination: &str) -> Result<(), Box<dyn Error>> {
     let mut job = TransferJob::new(TransferId::new(1)?, spec);
     let report = execute_file(&mut job, &backend, &backend)?;
     println!("copied {} bytes", report.bytes_copied());
+    Ok(())
+}
+
+fn local_copy_safe(source: &str, destination: &str) -> Result<(), Box<dyn Error>> {
+    let backend = local_backend()?;
+    let backend_id = backend.id().clone();
+    let spec = TransferSpec {
+        source: Endpoint {
+            backend: backend_id.clone(),
+            path: BackendPath::new(source)?,
+        },
+        destination: Endpoint {
+            backend: backend_id,
+            path: BackendPath::new(destination)?,
+        },
+    };
+    let mut job = TransferJob::new(TransferId::new(1)?, spec);
+    let report = cyber_pumpkin_transfer::execute_file_with_policy(
+        &mut job,
+        &backend,
+        &backend,
+        cyber_pumpkin_transfer::DestinationPolicy::FailIfExists,
+    )?;
+    println!("copied {} bytes", report.bytes_copied());
+    Ok(())
+}
+
+fn local_mkdir(path: &str) -> Result<(), Box<dyn Error>> {
+    let backend = local_backend()?;
+    backend.create_dir(&BackendPath::new(path)?)?;
+    println!("created {path}");
+    Ok(())
+}
+
+fn local_rename(source: &str, destination: &str) -> Result<(), Box<dyn Error>> {
+    let backend = local_backend()?;
+    backend.rename(&BackendPath::new(source)?, &BackendPath::new(destination)?)?;
+    println!("renamed {source} -> {destination}");
+    Ok(())
+}
+
+fn local_remove(path: &str) -> Result<(), Box<dyn Error>> {
+    let backend = local_backend()?;
+    backend.remove(&BackendPath::new(path)?)?;
+    println!("removed {path}");
     Ok(())
 }
 
