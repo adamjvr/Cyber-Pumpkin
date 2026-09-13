@@ -3,8 +3,8 @@ use adw::prelude::*;
 use cyber_pumpkin_core::EntryKind;
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_transfer::{
-    CancellationToken, ControlledTransferOutcome, Endpoint, TransferId, TransferJob,
-    TransferProgress, TransferSpec, execute_file_controlled,
+    CancellationToken, Endpoint, TransferId, TransferSpec, TreeTransferOutcome,
+    TreeTransferProgress, execute_tree_controlled,
 };
 use gtk::Orientation;
 use gtk::glib::{self, ControlFlow};
@@ -29,8 +29,8 @@ pub(crate) struct CopyBar {
 }
 
 enum CopyWorkerEvent {
-    Progress(TransferProgress),
-    Finished(Result<ControlledTransferOutcome, String>),
+    Progress(TreeTransferProgress),
+    Finished(Result<TreeTransferOutcome, String>),
 }
 
 pub(crate) fn build_copy_bar(
@@ -76,6 +76,12 @@ pub(crate) fn build_copy_bar(
     bar
 }
 
+impl CopyBar {
+    pub(crate) fn copy_between(&self, source: &PaneHandle, destination: &PaneHandle) {
+        start_copy(source, destination, self);
+    }
+}
+
 fn connect_bar(bar: &CopyBar, left: &PaneHandle, right: &PaneHandle) {
     connect_copy_button(&bar.copy_right, left, right, bar);
     connect_copy_button(&bar.copy_left, right, left, bar);
@@ -113,12 +119,12 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
     }
 
     let Some(entry) = source.selected_entry() else {
-        bar.status.set_text("Select a file to copy.");
+        bar.status.set_text("Select a file or folder to copy.");
         return;
     };
-    if entry.kind != EntryKind::File {
+    if matches!(entry.kind, EntryKind::Symlink | EntryKind::Other) {
         bar.status
-            .set_text("Folder copy lands in the recursive-transfer pass.");
+            .set_text("Links and special entries are not supported yet.");
         return;
     }
 
@@ -135,16 +141,11 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
     let source_backend_id = source.backend_id();
     let destination_backend_id = destination.backend_id();
     let source_path = entry.path;
-    let file_name = entry.name;
+    let item_name = entry.name;
     let (sender, receiver) = mpsc::channel();
     let cancellation = CancellationToken::new();
 
-    *bar.active_cancel.borrow_mut() = Some(cancellation.clone());
-    bar.copy_left.set_sensitive(false);
-    bar.copy_right.set_sensitive(false);
-    bar.cancel.set_sensitive(true);
-    bar.progress.set_fraction(0.0);
-    bar.status.set_text(&format!("Copying {file_name}…"));
+    begin_transfer_ui(bar, &item_name, &cancellation);
 
     let _worker = std::thread::spawn(move || {
         let source_backend = LocalBackend::new(source_backend_id.clone());
@@ -159,10 +160,9 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
                 path: destination_path,
             },
         };
-        let mut job = TransferJob::new(transfer_id, spec);
         let progress_sender = sender.clone();
-        let result = execute_file_controlled(
-            &mut job,
+        let result = execute_tree_controlled(
+            &spec,
             &source_backend,
             &destination_backend,
             &cancellation,
@@ -171,6 +171,7 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
             },
         )
         .map_err(|error| error.to_string());
+
         let _sent = sender.send(CopyWorkerEvent::Finished(result));
     });
 
@@ -178,34 +179,40 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
         receiver,
         destination.clone(),
         bar.clone(),
-        file_name,
+        item_name,
         transfer_id,
     );
+}
+
+fn begin_transfer_ui(bar: &CopyBar, item_name: &str, cancellation: &CancellationToken) {
+    *bar.active_cancel.borrow_mut() = Some(cancellation.clone());
+    bar.copy_left.set_sensitive(false);
+    bar.copy_right.set_sensitive(false);
+    bar.cancel.set_sensitive(true);
+    bar.progress.set_fraction(0.0);
+    bar.status.set_text(&format!("Copying {item_name}…"));
 }
 
 fn watch_result(
     receiver: mpsc::Receiver<CopyWorkerEvent>,
     destination: PaneHandle,
     bar: CopyBar,
-    file_name: String,
+    item_name: String,
     transfer_id: TransferId,
 ) {
     glib::timeout_add_local(Duration::from_millis(50), move || {
         loop {
             match receiver.try_recv() {
                 Ok(CopyWorkerEvent::Progress(progress)) => {
-                    update_progress(&bar, &file_name, progress);
+                    update_progress(&bar, &item_name, progress);
                 }
                 Ok(CopyWorkerEvent::Finished(result)) => {
-                    finish_result(&destination, &bar, &file_name, transfer_id, result);
+                    finish_result(&destination, &bar, &item_name, transfer_id, result);
                     return ControlFlow::Break;
                 }
                 Err(TryRecvError::Empty) => return ControlFlow::Continue,
                 Err(TryRecvError::Disconnected) => {
-                    clear_active(&bar);
-                    bar.progress.set_fraction(0.0);
-                    bar.status.set_text("Copy worker disconnected.");
-                    add_activity(&bar.activity_list, transfer_id, &file_name, "Failed", None);
+                    finish_disconnected(&bar, &item_name, transfer_id);
                     return ControlFlow::Break;
                 }
             }
@@ -213,69 +220,101 @@ fn watch_result(
     });
 }
 
-fn update_progress(bar: &CopyBar, file_name: &str, progress: TransferProgress) {
+fn update_progress(bar: &CopyBar, item_name: &str, progress: TreeTransferProgress) {
     if let Some(permille) = progress.permille() {
         bar.progress.set_fraction(f64::from(permille) / 1000.0);
     } else {
         bar.progress.pulse();
     }
 
-    let copied = format_size(Some(progress.bytes_copied()));
-    let detail = match progress.total_bytes() {
-        Some(total) => format!("{copied} / {}", format_size(Some(total))),
-        None => copied,
-    };
-    bar.status
-        .set_text(&format!("Copying {file_name} — {detail}"));
+    let bytes = progress.total_bytes().map_or_else(
+        || format_size(Some(progress.bytes_copied())),
+        |total| {
+            format!(
+                "{} / {}",
+                format_size(Some(progress.bytes_copied())),
+                format_size(Some(total))
+            )
+        },
+    );
+
+    bar.status.set_text(&format!(
+        "Copying {item_name} — {}/{} files • {bytes}",
+        progress.files_copied(),
+        progress.total_files()
+    ));
 }
 
 fn finish_result(
     destination: &PaneHandle,
     bar: &CopyBar,
-    file_name: &str,
+    item_name: &str,
     transfer_id: TransferId,
-    result: Result<ControlledTransferOutcome, String>,
+    result: Result<TreeTransferOutcome, String>,
 ) {
     clear_active(bar);
 
     match result {
-        Ok(ControlledTransferOutcome::Completed(report)) => {
-            let bytes = report.bytes_copied();
+        Ok(TreeTransferOutcome::Completed(report)) => {
             bar.progress.set_fraction(1.0);
             bar.status.set_text(&format!(
-                "Copied {file_name} — {}",
-                format_size(Some(bytes))
+                "Copied {item_name} — {} files • {}",
+                report.files_copied(),
+                format_size(Some(report.bytes_copied()))
             ));
             add_activity(
                 &bar.activity_list,
                 transfer_id,
-                file_name,
+                item_name,
                 "Completed",
-                Some(bytes),
+                report.files_copied(),
+                Some(report.bytes_copied()),
             );
             destination.refresh();
         }
-        Ok(ControlledTransferOutcome::Cancelled { bytes_copied }) => {
+        Ok(TreeTransferOutcome::Cancelled(report)) => {
             bar.progress.set_fraction(0.0);
             bar.status.set_text(&format!(
-                "Cancelled {file_name} after {}",
-                format_size(Some(bytes_copied))
+                "Cancelled {item_name} after {} files • cleaned destination",
+                report.files_copied()
             ));
             add_activity(
                 &bar.activity_list,
                 transfer_id,
-                file_name,
+                item_name,
                 "Cancelled",
-                Some(bytes_copied),
+                report.files_copied(),
+                Some(report.bytes_copied()),
             );
             destination.refresh();
         }
         Err(error) => {
             bar.progress.set_fraction(0.0);
             bar.status.set_text(&format!("Copy failed: {error}"));
-            add_activity(&bar.activity_list, transfer_id, file_name, "Failed", None);
+            add_activity(
+                &bar.activity_list,
+                transfer_id,
+                item_name,
+                "Failed",
+                0,
+                None,
+            );
         }
     }
+}
+
+fn finish_disconnected(bar: &CopyBar, item_name: &str, transfer_id: TransferId) {
+    clear_active(bar);
+    bar.progress.set_fraction(0.0);
+    bar.status.set_text("Copy worker disconnected.");
+    add_activity(
+        &bar.activity_list,
+        transfer_id,
+        item_name,
+        "Failed",
+        0,
+        None,
+    );
 }
 
 fn clear_active(bar: &CopyBar) {
@@ -288,14 +327,15 @@ fn clear_active(bar: &CopyBar) {
 fn add_activity(
     list: &gtk::ListBox,
     transfer_id: TransferId,
-    file_name: &str,
+    item_name: &str,
     state: &str,
+    files: u64,
     bytes: Option<u64>,
 ) {
     remove_empty_activity_row(list);
 
     let label = gtk::Label::new(Some(&format!(
-        "#{} • Copy {file_name} • {state} • {}",
+        "#{} • Copy {item_name} • {state} • {files} files • {}",
         transfer_id.get(),
         format_size(bytes)
     )));

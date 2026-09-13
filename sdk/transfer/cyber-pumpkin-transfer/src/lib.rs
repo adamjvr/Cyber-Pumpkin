@@ -5,6 +5,12 @@ pub use controlled::{
     CancellationToken, ControlledTransferOutcome, TransferProgress, execute_file_controlled,
 };
 
+mod recursive;
+pub use recursive::{
+    RecursiveError, TreeTransferOutcome, TreeTransferProgress, TreeTransferReport,
+    execute_tree_controlled,
+};
+
 use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind};
 use std::fmt;

@@ -1,8 +1,9 @@
-use crate::browser::{PaneHandle, PaneSide, build_pane};
-use crate::transfer_ui::build_copy_bar;
+use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane, format_size};
+use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
 use gtk::Orientation;
 use gtk::gio;
+use gtk::glib::variant::ToVariant;
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
@@ -17,14 +18,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
     let activity_revealer = create_activity_revealer(&activity_list);
     let copy_bar = build_copy_bar(&left, &right, &activity_list);
 
-    let panes = gtk::Paned::new(Orientation::Horizontal);
-    panes.set_hexpand(true);
-    panes.set_vexpand(true);
-    panes.set_position(560);
-    panes.set_wide_handle(true);
-    panes.set_start_child(Some(&left.root));
-    panes.set_end_child(Some(&right.root));
-
+    let panes = build_panes(&left, &right);
     let browser = gtk::Box::new(Orientation::Vertical, 0);
     browser.append(&build_toolbar(&left, &right, &active, &activity_revealer));
     browser.append(&copy_bar.root);
@@ -40,7 +34,15 @@ pub(crate) fn build_ui(app: &adw::Application) {
     header.set_title_widget(Some(&gtk::Label::new(Some("Cyber-Pumpkin"))));
     header.pack_end(&build_menu_button());
 
-    install_actions(app, &home, &left, &right, &active, &activity_revealer);
+    install_actions(
+        app,
+        &home,
+        &left,
+        &right,
+        &active,
+        &activity_revealer,
+        &copy_bar,
+    );
     install_accelerators(app);
 
     let root = gtk::Box::new(Orientation::Vertical, 0);
@@ -50,11 +52,22 @@ pub(crate) fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Cyber-Pumpkin")
-        .default_width(1320)
-        .default_height(820)
+        .default_width(1380)
+        .default_height(860)
         .content(&root)
         .build();
     window.present();
+}
+
+fn build_panes(left: &PaneHandle, right: &PaneHandle) -> gtk::Paned {
+    let panes = gtk::Paned::new(Orientation::Horizontal);
+    panes.set_hexpand(true);
+    panes.set_vexpand(true);
+    panes.set_position(590);
+    panes.set_wide_handle(true);
+    panes.set_start_child(Some(&left.root));
+    panes.set_end_child(Some(&right.root));
+    panes
 }
 
 fn build_menu_button() -> gtk::MenuButton {
@@ -62,6 +75,7 @@ fn build_menu_button() -> gtk::MenuButton {
 
     let file = gio::Menu::new();
     file.append(Some("New Folder…"), Some("app.new-folder"));
+    file.append(Some("Get Info"), Some("app.info"));
     file.append(Some("Rename…"), Some("app.rename"));
     file.append(Some("Delete…"), Some("app.delete"));
     menu.append_submenu(Some("File"), &file);
@@ -70,6 +84,12 @@ fn build_menu_button() -> gtk::MenuButton {
     view.append(Some("Refresh"), Some("app.refresh"));
     view.append(Some("Show Hidden Files"), Some("app.hidden"));
     view.append(Some("Show Activity"), Some("app.activity"));
+    let sort = gio::Menu::new();
+    sort.append(Some("Name"), Some("app.sort-name"));
+    sort.append(Some("Type"), Some("app.sort-type"));
+    sort.append(Some("Size"), Some("app.sort-size"));
+    sort.append(Some("Reverse Order"), Some("app.sort-reverse"));
+    view.append_submenu(Some("Sort By"), &sort);
     menu.append_submenu(Some("View"), &view);
 
     let go = gio::Menu::new();
@@ -77,6 +97,10 @@ fn build_menu_button() -> gtk::MenuButton {
     go.append(Some("Downloads"), Some("app.go-downloads"));
     go.append(Some("Root"), Some("app.go-root"));
     menu.append_submenu(Some("Go"), &go);
+
+    let transfer = gio::Menu::new();
+    transfer.append(Some("Copy to Other Pane"), Some("app.copy-other"));
+    menu.append_submenu(Some("Transfer"), &transfer);
 
     let help = gio::Menu::new();
     help.append(Some("About Cyber-Pumpkin"), Some("app.about"));
@@ -96,35 +120,64 @@ fn install_actions(
     right: &PaneHandle,
     active: &Rc<Cell<PaneSide>>,
     activity: &gtk::Revealer,
+    copy_bar: &CopyBar,
 ) {
-    install_simple_action(app, "refresh", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || active_pane(&left, &right, active.get()).refresh()
+    install_file_actions(app, left, right, active);
+    install_view_actions(app, left, right, active, activity);
+    install_go_actions(app, home, left, right, active);
+    install_transfer_action(app, left, right, active, copy_bar);
+    install_simple_action(app, "about", || {
+        let about = gtk::AboutDialog::builder()
+            .program_name("Cyber-Pumpkin")
+            .comments("Native dual-pane file transfer client")
+            .website("https://github.com/adamjvr/Cyber-Pumpkin")
+            .build();
+        about.present();
     });
+}
 
-    install_simple_action(app, "new-folder", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || show_new_folder_dialog(active_pane(&left, &right, active.get()))
-    });
+fn install_file_actions(
+    app: &adw::Application,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+) {
+    install_simple_action(
+        app,
+        "refresh",
+        pane_action(left, right, active, |pane| {
+            pane.refresh();
+        }),
+    );
+    install_simple_action(
+        app,
+        "new-folder",
+        pane_action(left, right, active, show_new_folder_dialog),
+    );
+    install_simple_action(
+        app,
+        "rename",
+        pane_action(left, right, active, show_rename_dialog),
+    );
+    install_simple_action(
+        app,
+        "delete",
+        pane_action(left, right, active, show_delete_dialog),
+    );
+    install_simple_action(
+        app,
+        "info",
+        pane_action(left, right, active, show_info_dialog),
+    );
+}
 
-    install_simple_action(app, "rename", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || show_rename_dialog(active_pane(&left, &right, active.get()))
-    });
-
-    install_simple_action(app, "delete", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || show_delete_dialog(active_pane(&left, &right, active.get()))
-    });
-
+fn install_view_actions(
+    app: &adw::Application,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+    activity: &gtk::Revealer,
+) {
     install_toggle_action(app, "hidden", false, {
         let left = left.clone();
         let right = right.clone();
@@ -139,6 +192,49 @@ fn install_actions(
         move |show| activity.set_reveal_child(show)
     });
 
+    install_simple_action(
+        app,
+        "sort-name",
+        pane_action(left, right, active, |pane| {
+            pane.set_sort_mode(SortMode::Name);
+        }),
+    );
+    install_simple_action(
+        app,
+        "sort-type",
+        pane_action(left, right, active, |pane| {
+            pane.set_sort_mode(SortMode::Type);
+        }),
+    );
+    install_simple_action(
+        app,
+        "sort-size",
+        pane_action(left, right, active, |pane| {
+            pane.set_sort_mode(SortMode::Size);
+        }),
+    );
+
+    let reverse = Rc::new(Cell::new(false));
+    install_simple_action(app, "sort-reverse", {
+        let left = left.clone();
+        let right = right.clone();
+        let active = Rc::clone(active);
+        let reverse = Rc::clone(&reverse);
+        move || {
+            let next = !reverse.get();
+            reverse.set(next);
+            active_pane(&left, &right, active.get()).set_sort_descending(next);
+        }
+    });
+}
+
+fn install_go_actions(
+    app: &adw::Application,
+    home: &str,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+) {
     let home_path = home.to_owned();
     install_simple_action(app, "go-home", {
         let left = left.clone();
@@ -164,15 +260,39 @@ fn install_actions(
         let active = Rc::clone(active);
         move || active_pane(&left, &right, active.get()).navigate_text("/")
     });
+}
 
-    install_simple_action(app, "about", || {
-        let about = gtk::AboutDialog::builder()
-            .program_name("Cyber-Pumpkin")
-            .comments("Native dual-pane file transfer client")
-            .website("https://github.com/adamjvr/Cyber-Pumpkin")
-            .build();
-        about.present();
+fn install_transfer_action(
+    app: &adw::Application,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+    copy_bar: &CopyBar,
+) {
+    let left = left.clone();
+    let right = right.clone();
+    let active = Rc::clone(active);
+    let copy_bar = copy_bar.clone();
+
+    install_simple_action(app, "copy-other", move || match active.get() {
+        PaneSide::Left => copy_bar.copy_between(&left, &right),
+        PaneSide::Right => copy_bar.copy_between(&right, &left),
     });
+}
+
+fn pane_action<F>(
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+    handler: F,
+) -> impl Fn() + 'static
+where
+    F: Fn(&PaneHandle) + 'static,
+{
+    let left = left.clone();
+    let right = right.clone();
+    let active = Rc::clone(active);
+    move || handler(active_pane(&left, &right, active.get()))
 }
 
 fn install_simple_action<F>(app: &adw::Application, name: &str, handler: F)
@@ -206,6 +326,8 @@ fn install_accelerators(app: &adw::Application) {
     app.set_accels_for_action("app.new-folder", &["<Primary><Shift>n"]);
     app.set_accels_for_action("app.rename", &["F2"]);
     app.set_accels_for_action("app.delete", &["Delete"]);
+    app.set_accels_for_action("app.info", &["<Primary>i"]);
+    app.set_accels_for_action("app.copy-other", &["<Primary><Shift>c"]);
     app.set_accels_for_action("app.hidden", &["<Primary>period"]);
 }
 
@@ -256,25 +378,82 @@ fn build_toolbar(
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Refresh active pane"));
     let new_folder = gtk::Button::with_label("New Folder");
+    let info = gtk::Button::with_label("Info");
     let rename = gtk::Button::with_label("Rename");
     let delete = gtk::Button::with_label("Delete");
     let hidden = gtk::ToggleButton::with_label("Hidden");
     let activity_button = gtk::ToggleButton::with_label("Activity");
+    let sort = create_sort_combo();
+    let reverse = gtk::ToggleButton::with_label("Reverse");
 
-    toolbar.append(&refresh);
-    toolbar.append(&new_folder);
-    toolbar.append(&rename);
-    toolbar.append(&delete);
-    toolbar.append(&hidden);
-    toolbar.append(&activity_button);
+    for widget in [
+        refresh.upcast_ref::<gtk::Widget>(),
+        new_folder.upcast_ref::<gtk::Widget>(),
+        info.upcast_ref::<gtk::Widget>(),
+        rename.upcast_ref::<gtk::Widget>(),
+        delete.upcast_ref::<gtk::Widget>(),
+        hidden.upcast_ref::<gtk::Widget>(),
+        activity_button.upcast_ref::<gtk::Widget>(),
+        sort.upcast_ref::<gtk::Widget>(),
+        reverse.upcast_ref::<gtk::Widget>(),
+    ] {
+        toolbar.append(widget);
+    }
 
-    connect_refresh(&refresh, left, right, active);
-    connect_new_folder(&new_folder, left, right, active);
-    connect_rename(&rename, left, right, active);
-    connect_delete(&delete, left, right, active);
-    connect_hidden(&hidden, left, right);
-    connect_activity(&activity_button, activity);
+    connect_toolbar_actions(
+        &refresh,
+        &new_folder,
+        &info,
+        &rename,
+        &delete,
+        &hidden,
+        &activity_button,
+        &sort,
+        &reverse,
+        left,
+        right,
+        active,
+        activity,
+    );
+
     toolbar
+}
+
+#[allow(clippy::too_many_arguments)]
+fn connect_toolbar_actions(
+    refresh: &gtk::Button,
+    new_folder: &gtk::Button,
+    info: &gtk::Button,
+    rename: &gtk::Button,
+    delete: &gtk::Button,
+    hidden: &gtk::ToggleButton,
+    activity_button: &gtk::ToggleButton,
+    sort: &gtk::ComboBoxText,
+    reverse: &gtk::ToggleButton,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+    activity: &gtk::Revealer,
+) {
+    connect_refresh(refresh, left, right, active);
+    connect_new_folder(new_folder, left, right, active);
+    connect_info(info, left, right, active);
+    connect_rename(rename, left, right, active);
+    connect_delete(delete, left, right, active);
+    connect_hidden(hidden, left, right);
+    connect_activity(activity_button, activity);
+    connect_sort(sort, left, right, active);
+    connect_reverse(reverse, left, right, active);
+}
+
+fn create_sort_combo() -> gtk::ComboBoxText {
+    let combo = gtk::ComboBoxText::new();
+    combo.append_text("Name");
+    combo.append_text("Type");
+    combo.append_text("Size");
+    combo.set_active(Some(0));
+    combo.set_tooltip_text(Some("Sort active pane"));
+    combo
 }
 
 fn connect_refresh(
@@ -283,12 +462,7 @@ fn connect_refresh(
     right: &PaneHandle,
     active: &Rc<Cell<PaneSide>>,
 ) {
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    button.clone().connect_clicked(move |_| {
-        active_pane(&left, &right, active.get()).refresh();
-    });
+    connect_button_to_pane(button, left, right, active, PaneHandle::refresh);
 }
 
 fn connect_new_folder(
@@ -297,12 +471,16 @@ fn connect_new_folder(
     right: &PaneHandle,
     active: &Rc<Cell<PaneSide>>,
 ) {
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    button.clone().connect_clicked(move |_| {
-        show_new_folder_dialog(active_pane(&left, &right, active.get()));
-    });
+    connect_button_to_pane(button, left, right, active, show_new_folder_dialog);
+}
+
+fn connect_info(
+    button: &gtk::Button,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+) {
+    connect_button_to_pane(button, left, right, active, show_info_dialog);
 }
 
 fn connect_rename(
@@ -311,12 +489,7 @@ fn connect_rename(
     right: &PaneHandle,
     active: &Rc<Cell<PaneSide>>,
 ) {
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    button.clone().connect_clicked(move |_| {
-        show_rename_dialog(active_pane(&left, &right, active.get()));
-    });
+    connect_button_to_pane(button, left, right, active, show_rename_dialog);
 }
 
 fn connect_delete(
@@ -325,11 +498,23 @@ fn connect_delete(
     right: &PaneHandle,
     active: &Rc<Cell<PaneSide>>,
 ) {
+    connect_button_to_pane(button, left, right, active, show_delete_dialog);
+}
+
+fn connect_button_to_pane<F>(
+    button: &gtk::Button,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+    handler: F,
+) where
+    F: Fn(&PaneHandle) + 'static,
+{
     let left = left.clone();
     let right = right.clone();
     let active = Rc::clone(active);
     button.clone().connect_clicked(move |_| {
-        show_delete_dialog(active_pane(&left, &right, active.get()));
+        handler(active_pane(&left, &right, active.get()));
     });
 }
 
@@ -350,6 +535,39 @@ fn connect_activity(button: &gtk::ToggleButton, activity: &gtk::Revealer) {
     });
 }
 
+fn connect_sort(
+    combo: &gtk::ComboBoxText,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+) {
+    let left = left.clone();
+    let right = right.clone();
+    let active = Rc::clone(active);
+    combo.clone().connect_changed(move |combo| {
+        let mode = match combo.active() {
+            Some(1) => SortMode::Type,
+            Some(2) => SortMode::Size,
+            _ => SortMode::Name,
+        };
+        active_pane(&left, &right, active.get()).set_sort_mode(mode);
+    });
+}
+
+fn connect_reverse(
+    button: &gtk::ToggleButton,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+) {
+    let left = left.clone();
+    let right = right.clone();
+    let active = Rc::clone(active);
+    button.clone().connect_toggled(move |toggle| {
+        active_pane(&left, &right, active.get()).set_sort_descending(toggle.is_active());
+    });
+}
+
 fn show_new_folder_dialog(pane: &PaneHandle) {
     show_text_dialog("New Folder", "Folder name", None, {
         let pane = pane.clone();
@@ -365,6 +583,35 @@ fn show_rename_dialog(pane: &PaneHandle) {
         let pane = pane.clone();
         move |text| pane.rename_selected(text)
     });
+}
+
+fn show_info_dialog(pane: &PaneHandle) {
+    let Some(entry) = pane.selected_entry() else {
+        return;
+    };
+
+    let kind = format!("{:?}", entry.kind);
+    let message = format!(
+        "Name: {}\nType: {kind}\nSize: {}\nPath: {}",
+        entry.name,
+        format_size(entry.size),
+        entry.path.as_str()
+    );
+
+    let dialog = gtk::Dialog::builder().title("Get Info").modal(true).build();
+    dialog.add_button("Close", gtk::ResponseType::Close);
+
+    let label = gtk::Label::new(Some(&message));
+    label.set_selectable(true);
+    label.set_xalign(0.0);
+    label.set_margin_top(16);
+    label.set_margin_bottom(16);
+    label.set_margin_start(16);
+    label.set_margin_end(16);
+    dialog.content_area().append(&label);
+
+    dialog.connect_response(|dialog, _| dialog.close());
+    dialog.present();
 }
 
 fn show_text_dialog<F>(title: &str, placeholder: &str, initial: Option<&str>, handler: F)

@@ -87,6 +87,10 @@ final class CPKClient {
         _ = try run(["local-copy-safe", source, destination])
     }
 
+    func copyTreeSafe(source: String, destination: String) throws {
+        _ = try run(["local-copy-tree-safe", source, destination])
+    }
+
     private func run(_ arguments: [String]) throws -> Data {
         let process = Process()
         process.executableURL = binary

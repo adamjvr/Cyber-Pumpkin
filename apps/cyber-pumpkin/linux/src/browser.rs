@@ -4,7 +4,9 @@ use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind, FileEntry};
 use cyber_pumpkin_local::LocalBackend;
 use gtk::Orientation;
+use gtk::gio;
 use std::cell::{Cell, RefCell};
+use std::cmp::Ordering;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -12,6 +14,13 @@ use std::rc::Rc;
 pub(crate) enum PaneSide {
     Left,
     Right,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SortMode {
+    Name,
+    Type,
+    Size,
 }
 
 #[derive(Clone)]
@@ -30,6 +39,8 @@ pub(crate) struct PaneHandle {
     session: Rc<RefCell<PaneSession>>,
     entries: Rc<RefCell<Vec<FileEntry>>>,
     show_hidden: Rc<Cell<bool>>,
+    sort_mode: Rc<Cell<SortMode>>,
+    sort_descending: Rc<Cell<bool>>,
     widgets: PaneWidgets,
 }
 
@@ -42,6 +53,8 @@ pub(crate) fn build_pane(
     let session = create_session(initial_path);
     let entries = Rc::new(RefCell::new(Vec::new()));
     let show_hidden = Rc::new(Cell::new(false));
+    let sort_mode = Rc::new(Cell::new(SortMode::Name));
+    let sort_descending = Rc::new(Cell::new(false));
     let (root, widgets) = create_widgets(title);
 
     let pane = PaneHandle {
@@ -49,9 +62,12 @@ pub(crate) fn build_pane(
         session,
         entries,
         show_hidden,
+        sort_mode,
+        sort_descending,
         widgets,
     };
     pane.connect_navigation(side, active);
+    pane.connect_context_menu(side, active);
     pane.refresh();
     pane
 }
@@ -83,6 +99,16 @@ impl PaneHandle {
         self.refresh();
     }
 
+    pub(crate) fn set_sort_mode(&self, mode: SortMode) {
+        self.sort_mode.set(mode);
+        self.refresh();
+    }
+
+    pub(crate) fn set_sort_descending(&self, descending: bool) {
+        self.sort_descending.set(descending);
+        self.refresh();
+    }
+
     pub(crate) fn selected_entry(&self) -> Option<FileEntry> {
         let row = self.widgets.list.selected_row()?;
         let index = usize::try_from(row.index()).ok()?;
@@ -102,7 +128,7 @@ impl PaneHandle {
     }
 
     pub(crate) fn create_folder(&self, name: &str) {
-        if name.is_empty() || name.contains('/') {
+        if invalid_name(name) {
             self.widgets.footer.set_text("Folder name is invalid.");
             return;
         }
@@ -124,7 +150,7 @@ impl PaneHandle {
     }
 
     pub(crate) fn rename_selected(&self, new_name: &str) {
-        if new_name.is_empty() || new_name.contains('/') {
+        if invalid_name(new_name) {
             self.widgets.footer.set_text("Name is invalid.");
             return;
         }
@@ -268,6 +294,32 @@ impl PaneHandle {
             });
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    fn connect_context_menu(&self, side: PaneSide, active: &Rc<Cell<PaneSide>>) {
+        let menu = gio::Menu::new();
+        menu.append(Some("Copy to Other Pane"), Some("app.copy-other"));
+        menu.append(Some("Get Info"), Some("app.info"));
+        menu.append(Some("Rename…"), Some("app.rename"));
+        menu.append(Some("Delete…"), Some("app.delete"));
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        popover.set_parent(&self.widgets.list);
+
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(3);
+        let active = Rc::clone(active);
+        let list = self.widgets.list.clone();
+        let popover_for_click = popover.clone();
+        gesture.connect_pressed(move |_, _, _, y| {
+            active.set(side);
+            if let Some(row) = list.row_at_y(y as i32) {
+                list.select_row(Some(&row));
+            }
+            popover_for_click.popup();
+        });
+        self.widgets.list.add_controller(gesture);
+    }
+
     fn navigate_to(&self, target: BackendPath) {
         match load_directory(&target) {
             Ok(loaded) => {
@@ -315,15 +367,20 @@ impl PaneHandle {
     }
 
     fn render(&self, loaded: Vec<FileEntry>) {
-        while let Some(child) = self.widgets.list.first_child() {
-            self.widgets.list.remove(&child);
+        while let Some(row) = self.widgets.list.row_at_index(0) {
+            self.widgets.list.remove(&row);
         }
 
         let show_hidden = self.show_hidden.get();
-        let visible: Vec<FileEntry> = loaded
+        let mut visible: Vec<FileEntry> = loaded
             .into_iter()
             .filter(|entry| show_hidden || !entry.name.starts_with('.'))
             .collect();
+        sort_entries(
+            &mut visible,
+            self.sort_mode.get(),
+            self.sort_descending.get(),
+        );
 
         for entry in &visible {
             let row = gtk::ListBoxRow::new();
@@ -332,6 +389,11 @@ impl PaneHandle {
         }
 
         *self.entries.borrow_mut() = visible;
+        self.update_navigation_widgets();
+        self.update_footer();
+    }
+
+    fn update_navigation_widgets(&self) {
         let session = self.session.borrow();
         self.widgets.path.set_text(session.location().as_str());
         self.widgets.back.set_sensitive(session.can_go_back());
@@ -339,8 +401,6 @@ impl PaneHandle {
         self.widgets
             .up
             .set_sensitive(Path::new(session.location().as_str()).parent().is_some());
-        drop(session);
-        self.update_footer();
     }
 
     fn update_footer(&self) {
@@ -350,10 +410,20 @@ impl PaneHandle {
         } else {
             ""
         };
-        self.widgets
-            .footer
-            .set_text(&format!("{count} items{hidden}"));
+        let order = if self.sort_descending.get() {
+            "descending"
+        } else {
+            "ascending"
+        };
+        self.widgets.footer.set_text(&format!(
+            "{count} items{hidden} • {} {order}",
+            sort_mode_text(self.sort_mode.get())
+        ));
     }
+}
+
+fn invalid_name(name: &str) -> bool {
+    name.is_empty() || name.contains('/')
 }
 
 fn create_session(initial_path: &str) -> Rc<RefCell<PaneSession>> {
@@ -476,6 +546,55 @@ const fn entry_kind_text(kind: EntryKind) -> &'static str {
         EntryKind::Directory => "Folder",
         EntryKind::Symlink => "Link",
         EntryKind::Other => "Other",
+    }
+}
+
+fn sort_entries(entries: &mut [FileEntry], mode: SortMode, descending: bool) {
+    entries.sort_by(|left, right| compare_entries(left, right, mode));
+    if descending {
+        entries.reverse();
+    }
+}
+
+fn compare_entries(left: &FileEntry, right: &FileEntry, mode: SortMode) -> Ordering {
+    let folder_order = folder_rank(left.kind).cmp(&folder_rank(right.kind));
+    if folder_order != Ordering::Equal {
+        return folder_order;
+    }
+
+    match mode {
+        SortMode::Name => compare_names(left, right),
+        SortMode::Type => entry_kind_text(left.kind)
+            .cmp(entry_kind_text(right.kind))
+            .then_with(|| compare_names(left, right)),
+        SortMode::Size => left
+            .size
+            .unwrap_or_default()
+            .cmp(&right.size.unwrap_or_default())
+            .then_with(|| compare_names(left, right)),
+    }
+}
+
+fn compare_names(left: &FileEntry, right: &FileEntry) -> Ordering {
+    left.name
+        .to_lowercase()
+        .cmp(&right.name.to_lowercase())
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+const fn folder_rank(kind: EntryKind) -> u8 {
+    if matches!(kind, EntryKind::Directory) {
+        0
+    } else {
+        1
+    }
+}
+
+const fn sort_mode_text(mode: SortMode) -> &'static str {
+    match mode {
+        SortMode::Name => "name",
+        SortMode::Type => "type",
+        SortMode::Size => "size",
     }
 }
 

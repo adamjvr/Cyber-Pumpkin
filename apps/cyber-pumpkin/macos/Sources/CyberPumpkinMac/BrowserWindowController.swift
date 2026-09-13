@@ -8,6 +8,7 @@ final class BrowserWindowController: NSObject {
     private var activePane: PaneViewController
     private let status = NSTextField(labelWithString: "Ready")
     private let activity = NSTextField(labelWithString: "No transfer activity yet.")
+    private var reverseSort = false
 
     init(client: CPKClient) {
         self.client = client
@@ -18,7 +19,7 @@ final class BrowserWindowController: NSObject {
         right = rightPane
         activePane = leftPane
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1320, height: 820),
+            contentRect: NSRect(x: 0, y: 0, width: 1380, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -35,6 +36,7 @@ final class BrowserWindowController: NSObject {
         }
 
         configureWindow()
+        installContextMenus()
     }
 
     func show() {
@@ -55,12 +57,15 @@ final class BrowserWindowController: NSObject {
 
     private func appMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
+        item.title = "Cyber-Pumpkin"
         let menu = NSMenu()
 
-        menu.addItem(
-            withTitle: "About Cyber-Pumpkin",
-            action: #selector(showAbout),
-            keyEquivalent: ""
+        addTargetedItem(
+            menu,
+            "About Cyber-Pumpkin",
+            #selector(showAbout),
+            "",
+            []
         )
         menu.addItem(.separator())
         menu.addItem(
@@ -77,11 +82,42 @@ final class BrowserWindowController: NSObject {
         item.title = "File"
         let menu = NSMenu(title: "File")
 
-        addTargetedItem(menu, "New Folder…", #selector(newFolder), "n", [.command, .shift])
-        addTargetedItem(menu, "Rename…", #selector(renameSelected), "\r", [])
-        addTargetedItem(menu, "Delete…", #selector(deleteSelected), "\u{8}", [])
+        addTargetedItem(
+            menu,
+            "New Folder…",
+            #selector(newFolder),
+            "n",
+            [.command, .shift]
+        )
+        addTargetedItem(
+            menu,
+            "Get Info",
+            #selector(showInfo),
+            "i",
+            [.command]
+        )
+        addTargetedItem(
+            menu,
+            "Rename…",
+            #selector(renameSelected),
+            "\r",
+            []
+        )
+        addTargetedItem(
+            menu,
+            "Delete…",
+            #selector(deleteSelected),
+            "\u{8}",
+            []
+        )
         menu.addItem(.separator())
-        addTargetedItem(menu, "Refresh", #selector(refreshActive), "r", [.command])
+        addTargetedItem(
+            menu,
+            "Refresh",
+            #selector(refreshActive),
+            "r",
+            [.command]
+        )
 
         item.submenu = menu
         return item
@@ -106,9 +142,31 @@ final class BrowserWindowController: NSObject {
             "",
             []
         )
+        menu.addItem(.separator())
+
+        let sortItem = NSMenuItem()
+        sortItem.title = "Sort By"
+        sortItem.submenu = sortMenu()
+        menu.addItem(sortItem)
 
         item.submenu = menu
         return item
+    }
+
+    private func sortMenu() -> NSMenu {
+        let menu = NSMenu(title: "Sort By")
+        addTargetedItem(menu, "Name", #selector(sortByName), "", [])
+        addTargetedItem(menu, "Type", #selector(sortByType), "", [])
+        addTargetedItem(menu, "Size", #selector(sortBySize), "", [])
+        menu.addItem(.separator())
+        addTargetedItem(
+            menu,
+            "Reverse Order",
+            #selector(toggleSortDirection),
+            "",
+            []
+        )
+        return menu
     }
 
     private func goMenuItem() -> NSMenuItem {
@@ -116,28 +174,11 @@ final class BrowserWindowController: NSObject {
         item.title = "Go"
         let menu = NSMenu(title: "Go")
 
-        addPlaceItem(menu, "Home", FileManager.default.homeDirectoryForCurrentUser.path)
-        addPlaceItem(
-            menu,
-            "Desktop",
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Desktop")
-                .path
-        )
-        addPlaceItem(
-            menu,
-            "Documents",
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Documents")
-                .path
-        )
-        addPlaceItem(
-            menu,
-            "Downloads",
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Downloads")
-                .path
-        )
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        addPlaceItem(menu, "Home", home.path)
+        addPlaceItem(menu, "Desktop", home.appendingPathComponent("Desktop").path)
+        addPlaceItem(menu, "Documents", home.appendingPathComponent("Documents").path)
+        addPlaceItem(menu, "Downloads", home.appendingPathComponent("Downloads").path)
         addPlaceItem(menu, "Root", "/")
 
         item.submenu = menu
@@ -148,13 +189,15 @@ final class BrowserWindowController: NSObject {
         let item = NSMenuItem()
         item.title = "Transfer"
         let menu = NSMenu(title: "Transfer")
+
         addTargetedItem(
             menu,
             "Copy to Other Pane",
             #selector(copyToOtherPane),
-            "",
-            []
+            "c",
+            [.command, .shift]
         )
+
         item.submenu = menu
         return item
     }
@@ -163,6 +206,7 @@ final class BrowserWindowController: NSObject {
         let item = NSMenuItem()
         item.title = "Help"
         let menu = NSMenu(title: "Help")
+
         addTargetedItem(
             menu,
             "About Cyber-Pumpkin",
@@ -170,8 +214,30 @@ final class BrowserWindowController: NSObject {
             "",
             []
         )
+
         item.submenu = menu
         return item
+    }
+
+    private func installContextMenus() {
+        left.installContextMenu(contextMenu())
+        right.installContextMenu(contextMenu())
+    }
+
+    private func contextMenu() -> NSMenu {
+        let menu = NSMenu()
+        addTargetedItem(
+            menu,
+            "Copy to Other Pane",
+            #selector(copyToOtherPane),
+            "",
+            []
+        )
+        menu.addItem(.separator())
+        addTargetedItem(menu, "Get Info", #selector(showInfo), "", [])
+        addTargetedItem(menu, "Rename…", #selector(renameSelected), "", [])
+        addTargetedItem(menu, "Delete…", #selector(deleteSelected), "", [])
+        return menu
     }
 
     private func addTargetedItem(
@@ -248,6 +314,11 @@ final class BrowserWindowController: NSObject {
             target: self,
             action: #selector(newFolder)
         )
+        let info = NSButton(
+            title: "Info",
+            target: self,
+            action: #selector(showInfo)
+        )
         let rename = NSButton(
             title: "Rename",
             target: self,
@@ -278,11 +349,22 @@ final class BrowserWindowController: NSObject {
             target: self,
             action: #selector(toggleActivityButton(_:))
         )
+        let sort = NSPopUpButton()
+        sort.addItems(withTitles: ["Name", "Type", "Size"])
+        sort.target = self
+        sort.action = #selector(sortChanged(_:))
+
+        let reverse = NSButton(
+            checkboxWithTitle: "Reverse",
+            target: self,
+            action: #selector(reverseChanged(_:))
+        )
 
         status.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [
-            refresh, newFolder, rename, delete,
-            copyLeft, copyRight, hidden, activityButton, status
+            refresh, newFolder, info, rename, delete,
+            copyLeft, copyRight, hidden, activityButton,
+            sort, reverse, status
         ])
         stack.orientation = .horizontal
         stack.spacing = 6
@@ -320,6 +402,7 @@ final class BrowserWindowController: NSObject {
             button.bezelStyle = .inline
             stack.addArrangedSubview(button)
         }
+
         return stack
     }
 
@@ -341,9 +424,14 @@ final class BrowserWindowController: NSObject {
             title: "New Folder",
             message: "Create a folder in \(activePane.currentPath)",
             initial: ""
-        ) else { return }
+        ) else {
+            return
+        }
 
-        guard !name.isEmpty, !name.contains("/") else { return }
+        guard validName(name) else {
+            return
+        }
+
         let path = URL(fileURLWithPath: activePane.currentPath)
             .appendingPathComponent(name)
             .path
@@ -362,13 +450,19 @@ final class BrowserWindowController: NSObject {
             status.stringValue = "Select an item to rename."
             return
         }
+
         guard let name = prompt(
             title: "Rename",
             message: "Rename \(entry.name)",
             initial: entry.name
-        ) else { return }
+        ) else {
+            return
+        }
 
-        guard !name.isEmpty, !name.contains("/") else { return }
+        guard validName(name) else {
+            return
+        }
+
         let destination = URL(fileURLWithPath: activePane.currentPath)
             .appendingPathComponent(name)
             .path
@@ -393,7 +487,10 @@ final class BrowserWindowController: NSObject {
         alert.informativeText = "Non-empty folders are not removed recursively yet."
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
 
         do {
             try client.remove(path: entry.path)
@@ -402,6 +499,23 @@ final class BrowserWindowController: NSObject {
         } catch {
             status.stringValue = "Delete failed: \(error.localizedDescription)"
         }
+    }
+
+    @objc private func showInfo() {
+        guard let entry = activePane.selectedEntry() else {
+            status.stringValue = "Select an item to inspect."
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = entry.name
+        alert.informativeText = [
+            "Type: \(entry.kind)",
+            "Size: \(activePane.formatSize(entry.size))",
+            "Path: \(entry.path)"
+        ].joined(separator: "\n")
+        alert.addButton(withTitle: "Close")
+        alert.runModal()
     }
 
     @objc private func copyLeftToRight() {
@@ -423,8 +537,8 @@ final class BrowserWindowController: NSObject {
         source: PaneViewController,
         destination: PaneViewController
     ) {
-        guard let entry = source.selectedEntry(), !entry.isDirectory else {
-            status.stringValue = "Select a regular file to copy."
+        guard let entry = source.selectedEntry() else {
+            status.stringValue = "Select a file or folder to copy."
             return
         }
 
@@ -434,13 +548,17 @@ final class BrowserWindowController: NSObject {
         status.stringValue = "Copying \(entry.name)…"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                return
+            }
+
             let result = Result {
-                try self.client.copySafe(
+                try self.client.copyTreeSafe(
                     source: entry.path,
                     destination: destinationPath
                 )
             }
+
             DispatchQueue.main.async {
                 switch result {
                 case .success:
@@ -481,6 +599,41 @@ final class BrowserWindowController: NSObject {
         activity.isHidden = !next
     }
 
+    @objc private func sortChanged(_ sender: NSPopUpButton) {
+        let mode: PaneSortMode
+        switch sender.indexOfSelectedItem {
+        case 1:
+            mode = .type
+        case 2:
+            mode = .size
+        default:
+            mode = .name
+        }
+        activePane.setSort(mode: mode)
+    }
+
+    @objc private func reverseChanged(_ sender: NSButton) {
+        reverseSort = sender.state == .on
+        activePane.setSortDescending(reverseSort)
+    }
+
+    @objc private func sortByName() {
+        activePane.setSort(mode: .name)
+    }
+
+    @objc private func sortByType() {
+        activePane.setSort(mode: .type)
+    }
+
+    @objc private func sortBySize() {
+        activePane.setSort(mode: .size)
+    }
+
+    @objc private func toggleSortDirection() {
+        reverseSort.toggle()
+        activePane.setSortDescending(reverseSort)
+    }
+
     private func prompt(
         title: String,
         message: String,
@@ -497,8 +650,14 @@ final class BrowserWindowController: NSObject {
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
         return field.stringValue
+    }
+
+    private func validName(_ name: String) -> Bool {
+        !name.isEmpty && !name.contains("/")
     }
 
     @objc private func showAbout() {

@@ -1,18 +1,42 @@
 import AppKit
 
+enum PaneSortMode: String {
+    case name
+    case type
+    case size
+}
+
+final class ContextTableView: NSTableView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        let clickedRow = row(at: point)
+        if clickedRow >= 0 {
+            selectRowIndexes(
+                IndexSet(integer: clickedRow),
+                byExtendingSelection: false
+            )
+        }
+        return super.menu(for: event)
+    }
+}
+
 final class PaneViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     let titleText: String
     let client: CPKClient
     private(set) var currentPath: String
+
     var showHidden = false {
-        didSet { applyFilter() }
+        didSet { applyFilterAndSort() }
     }
+
     var onBecameActive: (() -> Void)?
 
     private var allEntries: [CPKEntry] = []
     private var visibleEntries: [CPKEntry] = []
+    private var sortMode: PaneSortMode = .name
+    private var sortDescending = false
     private let pathField = NSTextField()
-    private let tableView = NSTableView()
+    private let tableView = ContextTableView()
     private let footer = NSTextField(labelWithString: "0 items")
 
     init(title: String, path: String, client: CPKClient) {
@@ -46,6 +70,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         pathField.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         configureTable()
+
         let scroll = NSScrollView()
         scroll.documentView = tableView
         scroll.hasVerticalScroller = true
@@ -73,7 +98,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     func reloadDirectory() {
         do {
             allEntries = try client.list(path: currentPath)
-            applyFilter()
+            applyFilterAndSort()
             pathField.stringValue = currentPath
         } catch {
             footer.stringValue = "Load failed: \(error.localizedDescription)"
@@ -87,17 +112,66 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     func selectedEntry() -> CPKEntry? {
-        let row = tableView.selectedRow
-        guard row >= 0, row < visibleEntries.count else { return nil }
-        return visibleEntries[row]
+        let selected = tableView.selectedRow
+        guard selected >= 0, selected < visibleEntries.count else {
+            return nil
+        }
+        return visibleEntries[selected]
     }
 
-    private func applyFilter() {
+    func setSort(mode: PaneSortMode) {
+        sortMode = mode
+        applyFilterAndSort()
+    }
+
+    func setSortDescending(_ descending: Bool) {
+        sortDescending = descending
+        applyFilterAndSort()
+    }
+
+    func installContextMenu(_ menu: NSMenu) {
+        tableView.menu = menu
+    }
+
+    private func applyFilterAndSort() {
         visibleEntries = showHidden
             ? allEntries
             : allEntries.filter { !$0.name.hasPrefix(".") }
+
+        visibleEntries.sort(by: entryComesBefore)
+        if sortDescending {
+            visibleEntries.reverse()
+        }
+
         tableView.reloadData()
-        footer.stringValue = "\(visibleEntries.count) items"
+        let order = sortDescending ? "descending" : "ascending"
+        footer.stringValue =
+            "\(visibleEntries.count) items • \(sortMode.rawValue) \(order)"
+    }
+
+    private func entryComesBefore(_ left: CPKEntry, _ right: CPKEntry) -> Bool {
+        if left.isDirectory != right.isDirectory {
+            return left.isDirectory
+        }
+
+        switch sortMode {
+        case .name:
+            return compareNames(left, right)
+        case .type:
+            if left.kind == right.kind {
+                return compareNames(left, right)
+            }
+            return left.kind.localizedCaseInsensitiveCompare(right.kind) == .orderedAscending
+        case .size:
+            if left.size == right.size {
+                return compareNames(left, right)
+            }
+            return (left.size ?? 0) < (right.size ?? 0)
+        }
+    }
+
+    private func compareNames(_ left: CPKEntry, _ right: CPKEntry) -> Bool {
+        left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
     }
 
     private func configureTable() {
@@ -107,15 +181,19 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
             ("size", "Size", 100)
         ]
         for (identifier, title, width) in columns {
-            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
+            let column = NSTableColumn(
+                identifier: NSUserInterfaceItemIdentifier(identifier)
+            )
             column.title = title
             column.width = width
             tableView.addTableColumn(column)
         }
+
         tableView.delegate = self
         tableView.dataSource = self
         tableView.target = self
         tableView.doubleAction = #selector(openSelected)
+        tableView.allowsMultipleSelection = false
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -129,6 +207,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     ) -> NSView? {
         let entry = visibleEntries[row]
         let value: String
+
         switch tableColumn?.identifier.rawValue {
         case "kind":
             value = entry.kind
@@ -137,16 +216,20 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         default:
             value = entry.name
         }
+
         return NSTextField(labelWithString: value)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         onBecameActive?()
+
         guard let entry = selectedEntry() else {
-            footer.stringValue = "\(visibleEntries.count) items"
+            updateFooter()
             return
         }
-        footer.stringValue = "\(entry.name) selected • \(formatSize(entry.size))"
+
+        footer.stringValue =
+            "\(entry.name) selected • \(formatSize(entry.size))"
     }
 
     @objc private func pathCommitted() {
@@ -154,22 +237,40 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     @objc private func openSelected() {
-        guard let entry = selectedEntry(), entry.isDirectory else { return }
+        guard let entry = selectedEntry(), entry.isDirectory else {
+            return
+        }
         navigate(to: entry.path)
     }
 
     @objc private func goUp() {
-        let parent = URL(fileURLWithPath: currentPath).deletingLastPathComponent().path
+        let parent = URL(fileURLWithPath: currentPath)
+            .deletingLastPathComponent()
+            .path
         if parent != currentPath {
             navigate(to: parent)
         }
     }
 
-    private func formatSize(_ size: UInt64?) -> String {
-        guard let bytes = size else { return "—" }
-        if bytes < 1_024 { return "\(bytes) B" }
-        if bytes < 1_048_576 { return "\(bytes / 1_024) KiB" }
-        if bytes < 1_073_741_824 { return "\(bytes / 1_048_576) MiB" }
+    private func updateFooter() {
+        let order = sortDescending ? "descending" : "ascending"
+        footer.stringValue =
+            "\(visibleEntries.count) items • \(sortMode.rawValue) \(order)"
+    }
+
+    func formatSize(_ size: UInt64?) -> String {
+        guard let bytes = size else {
+            return "—"
+        }
+        if bytes < 1_024 {
+            return "\(bytes) B"
+        }
+        if bytes < 1_048_576 {
+            return "\(bytes / 1_024) KiB"
+        }
+        if bytes < 1_073_741_824 {
+            return "\(bytes / 1_048_576) MiB"
+        }
         return "\(bytes / 1_073_741_824) GiB"
     }
 }
