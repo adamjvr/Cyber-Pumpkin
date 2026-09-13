@@ -1,7 +1,6 @@
 use crate::browser::{PaneHandle, format_size};
 use adw::prelude::*;
 use cyber_pumpkin_core::EntryKind;
-use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_transfer::{
     CancellationToken, Endpoint, TransferId, TransferSpec, TreeTransferOutcome,
     TreeTransferProgress, execute_tree_controlled,
@@ -138,8 +137,10 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
         return;
     };
 
-    let source_backend_id = source.backend_id();
-    let destination_backend_id = destination.backend_id();
+    let source_connection = source.connection();
+    let destination_connection = destination.connection();
+    let source_backend_id = source_connection.backend_id();
+    let destination_backend_id = destination_connection.backend_id();
     let source_path = entry.path;
     let item_name = entry.name;
     let (sender, receiver) = mpsc::channel();
@@ -148,29 +149,31 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
     begin_transfer_ui(bar, &item_name, &cancellation);
 
     let _worker = std::thread::spawn(move || {
-        let source_backend = LocalBackend::new(source_backend_id.clone());
-        let destination_backend = LocalBackend::new(destination_backend_id.clone());
-        let spec = TransferSpec {
-            source: Endpoint {
-                backend: source_backend_id,
-                path: source_path,
-            },
-            destination: Endpoint {
-                backend: destination_backend_id,
-                path: destination_path,
-            },
-        };
-        let progress_sender = sender.clone();
-        let result = execute_tree_controlled(
-            &spec,
-            &source_backend,
-            &destination_backend,
-            &cancellation,
-            move |progress| {
-                let _sent = progress_sender.send(CopyWorkerEvent::Progress(progress));
-            },
-        )
-        .map_err(|error| error.to_string());
+        let result = (|| {
+            let source_backend = source_connection.connect_backend()?;
+            let destination_backend = destination_connection.connect_backend()?;
+            let spec = TransferSpec {
+                source: Endpoint {
+                    backend: source_backend_id,
+                    path: source_path,
+                },
+                destination: Endpoint {
+                    backend: destination_backend_id,
+                    path: destination_path,
+                },
+            };
+            let progress_sender = sender.clone();
+            execute_tree_controlled(
+                &spec,
+                source_backend.as_ref(),
+                destination_backend.as_ref(),
+                &cancellation,
+                move |progress| {
+                    let _sent = progress_sender.send(CopyWorkerEvent::Progress(progress));
+                },
+            )
+            .map_err(|error| error.to_string())
+        })();
 
         let _sent = sender.send(CopyWorkerEvent::Finished(result));
     });

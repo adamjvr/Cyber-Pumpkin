@@ -74,6 +74,8 @@ fn build_menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
 
     let file = gio::Menu::new();
+    file.append(Some("Connect SFTP…"), Some("app.connect-sftp"));
+    file.append(Some("Disconnect to Local"), Some("app.disconnect-local"));
     file.append(Some("New Folder…"), Some("app.new-folder"));
     file.append(Some("Get Info"), Some("app.info"));
     file.append(Some("Rename…"), Some("app.rename"));
@@ -144,10 +146,18 @@ fn install_file_actions(
 ) {
     install_simple_action(
         app,
+        "connect-sftp",
+        pane_action(left, right, active, show_sftp_dialog),
+    );
+    install_simple_action(
+        app,
+        "disconnect-local",
+        pane_action(left, right, active, disconnect_to_local),
+    );
+    install_simple_action(
+        app,
         "refresh",
-        pane_action(left, right, active, |pane| {
-            pane.refresh();
-        }),
+        pane_action(left, right, active, PaneHandle::refresh),
     );
     install_simple_action(
         app,
@@ -323,6 +333,7 @@ where
 
 fn install_accelerators(app: &adw::Application) {
     app.set_accels_for_action("app.refresh", &["<Primary>r"]);
+    app.set_accels_for_action("app.connect-sftp", &["<Primary>k"]);
     app.set_accels_for_action("app.new-folder", &["<Primary><Shift>n"]);
     app.set_accels_for_action("app.rename", &["F2"]);
     app.set_accels_for_action("app.delete", &["Delete"]);
@@ -377,6 +388,10 @@ fn build_toolbar(
 
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Refresh active pane"));
+    let connect = gtk::Button::with_label("Connect");
+    connect.set_tooltip_text(Some("Connect active pane to SFTP"));
+    let local = gtk::Button::with_label("Local");
+    local.set_tooltip_text(Some("Disconnect active pane back to the local filesystem"));
     let new_folder = gtk::Button::with_label("New Folder");
     let info = gtk::Button::with_label("Info");
     let rename = gtk::Button::with_label("Rename");
@@ -388,6 +403,8 @@ fn build_toolbar(
 
     for widget in [
         refresh.upcast_ref::<gtk::Widget>(),
+        connect.upcast_ref::<gtk::Widget>(),
+        local.upcast_ref::<gtk::Widget>(),
         new_folder.upcast_ref::<gtk::Widget>(),
         info.upcast_ref::<gtk::Widget>(),
         rename.upcast_ref::<gtk::Widget>(),
@@ -402,6 +419,8 @@ fn build_toolbar(
 
     connect_toolbar_actions(
         &refresh,
+        &connect,
+        &local,
         &new_folder,
         &info,
         &rename,
@@ -422,6 +441,8 @@ fn build_toolbar(
 #[allow(clippy::too_many_arguments)]
 fn connect_toolbar_actions(
     refresh: &gtk::Button,
+    connect: &gtk::Button,
+    local: &gtk::Button,
     new_folder: &gtk::Button,
     info: &gtk::Button,
     rename: &gtk::Button,
@@ -436,6 +457,8 @@ fn connect_toolbar_actions(
     activity: &gtk::Revealer,
 ) {
     connect_refresh(refresh, left, right, active);
+    connect_button_to_pane(connect, left, right, active, show_sftp_dialog);
+    connect_button_to_pane(local, left, right, active, disconnect_to_local);
     connect_new_folder(new_folder, left, right, active);
     connect_info(info, left, right, active);
     connect_rename(rename, left, right, active);
@@ -566,6 +589,69 @@ fn connect_reverse(
     button.clone().connect_toggled(move |toggle| {
         active_pane(&left, &right, active.get()).set_sort_descending(toggle.is_active());
     });
+}
+
+fn show_sftp_dialog(pane: &PaneHandle) {
+    let dialog = gtk::Dialog::builder()
+        .title("Connect SFTP")
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Connect", gtk::ResponseType::Accept);
+
+    let fields = gtk::Box::new(Orientation::Vertical, 6);
+    fields.set_margin_top(12);
+    fields.set_margin_bottom(12);
+    fields.set_margin_start(12);
+    fields.set_margin_end(12);
+
+    let host = gtk::Entry::new();
+    host.set_placeholder_text(Some("Host"));
+    let username = gtk::Entry::new();
+    username.set_placeholder_text(Some("Username"));
+    let port = gtk::Entry::new();
+    port.set_placeholder_text(Some("Port"));
+    port.set_text("22");
+    let path = gtk::Entry::new();
+    path.set_placeholder_text(Some("Remote path"));
+    path.set_text("/");
+
+    for field in [&host, &username, &port, &path] {
+        fields.append(field);
+    }
+    dialog.content_area().append(&fields);
+
+    let pane = pane.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            let port_number = port.text().parse::<u16>().unwrap_or(22);
+            if let Err(error) = pane.connect_sftp(
+                host.text().as_str(),
+                username.text().as_str(),
+                port_number,
+                path.text().as_str(),
+            ) {
+                let error_dialog = gtk::MessageDialog::builder()
+                    .modal(true)
+                    .message_type(gtk::MessageType::Error)
+                    .buttons(gtk::ButtonsType::Close)
+                    .text("SFTP connection failed")
+                    .secondary_text(&error)
+                    .build();
+                error_dialog.connect_response(|dialog, _| dialog.close());
+                error_dialog.present();
+            }
+        }
+        dialog.close();
+    });
+    dialog.present();
+}
+
+fn disconnect_to_local(pane: &PaneHandle) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
+    if let Err(error) = pane.disconnect_to_local(&home) {
+        eprintln!("failed to return pane to local filesystem: {error}");
+    }
 }
 
 fn show_new_folder_dialog(pane: &PaneHandle) {

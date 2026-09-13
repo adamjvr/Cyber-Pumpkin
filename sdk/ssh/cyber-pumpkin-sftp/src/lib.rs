@@ -7,7 +7,7 @@ use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind, ReadStream, WriteS
 use cyber_pumpkin_core::{
     BackendCapabilities, BackendId, BackendPath, CapabilitySupport, EntryKind, FileEntry,
 };
-use ssh2::{CheckResult, FileStat, KnownHostFileKind, Session, Sftp};
+use ssh2::{CheckResult, ErrorCode, FileStat, KnownHostFileKind, Session, Sftp};
 use std::env;
 use std::io;
 use std::net::TcpStream;
@@ -373,12 +373,12 @@ impl SftpBackend {
     }
 
     fn ssh_error(operation: &'static str, path: &BackendPath, error: &ssh2::Error) -> BackendError {
-        BackendError::new(
-            ErrorKind::Protocol,
-            operation,
-            Some(path.clone()),
-            error.to_string(),
-        )
+        let kind = match error.code() {
+            ErrorCode::SFTP(2) => ErrorKind::NotFound,
+            ErrorCode::SFTP(3) => ErrorKind::PermissionDenied,
+            _ => ErrorKind::Protocol,
+        };
+        BackendError::new(kind, operation, Some(path.clone()), error.to_string())
     }
 
     fn io_error(

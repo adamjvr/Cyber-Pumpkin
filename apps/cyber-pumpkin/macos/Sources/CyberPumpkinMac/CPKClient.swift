@@ -9,15 +9,42 @@ struct CPKEntry {
     var isDirectory: Bool { kind == "Directory" }
 }
 
+struct SFTPConnection: Equatable {
+    let host: String
+    let username: String
+    let port: UInt16
+
+    var displayName: String {
+        "\(username)@\(host):\(port)"
+    }
+}
+
+enum BrowserConnection: Equatable {
+    case local
+    case sftp(SFTPConnection)
+
+    var displayName: String {
+        switch self {
+        case .local:
+            return "Local"
+        case .sftp(let connection):
+            return "SFTP — \(connection.displayName)"
+        }
+    }
+}
+
 enum CPKError: LocalizedError {
     case binaryNotFound
     case commandFailed(String)
+    case unsupportedTransfer(String)
 
     var errorDescription: String? {
         switch self {
         case .binaryNotFound:
             return "Could not locate the cpk Rust companion binary."
         case .commandFailed(let message):
+            return message
+        case .unsupportedTransfer(let message):
             return message
         }
     }
@@ -46,14 +73,121 @@ final class CPKClient {
         binary = found
     }
 
-    func list(path: String) throws -> [CPKEntry] {
-        let data = try run(["local-ls", path])
+    func list(connection: BrowserConnection, path: String) throws -> [CPKEntry] {
+        let arguments: [String]
+        switch connection {
+        case .local:
+            arguments = ["local-ls", path]
+        case .sftp(let remote):
+            arguments = [
+                "sftp-ls",
+                remote.host,
+                remote.username,
+                path,
+                String(remote.port)
+            ]
+        }
+        return try parseEntries(run(arguments))
+    }
+
+    func createDirectory(connection: BrowserConnection, path: String) throws {
+        switch connection {
+        case .local:
+            _ = try run(["local-mkdir", path])
+        case .sftp(let remote):
+            _ = try run([
+                "sftp-mkdir",
+                remote.host,
+                remote.username,
+                path,
+                String(remote.port)
+            ])
+        }
+    }
+
+    func rename(
+        connection: BrowserConnection,
+        source: String,
+        destination: String
+    ) throws {
+        switch connection {
+        case .local:
+            _ = try run(["local-rename", source, destination])
+        case .sftp(let remote):
+            _ = try run([
+                "sftp-rename",
+                remote.host,
+                remote.username,
+                source,
+                destination,
+                String(remote.port)
+            ])
+        }
+    }
+
+    func remove(connection: BrowserConnection, path: String) throws {
+        switch connection {
+        case .local:
+            _ = try run(["local-rm", path])
+        case .sftp(let remote):
+            _ = try run([
+                "sftp-rm",
+                remote.host,
+                remote.username,
+                path,
+                String(remote.port)
+            ])
+        }
+    }
+
+    func copyTree(
+        sourceConnection: BrowserConnection,
+        source: String,
+        destinationConnection: BrowserConnection,
+        destination: String
+    ) throws {
+        switch (sourceConnection, destinationConnection) {
+        case (.local, .local):
+            _ = try run(["local-copy-tree-safe", source, destination])
+
+        case (.local, .sftp(let remote)):
+            _ = try run([
+                "sftp-copy-tree-put",
+                source,
+                remote.host,
+                remote.username,
+                destination,
+                String(remote.port)
+            ])
+
+        case (.sftp(let remote), .local):
+            _ = try run([
+                "sftp-copy-tree-get",
+                remote.host,
+                remote.username,
+                source,
+                destination,
+                String(remote.port)
+            ])
+
+        case (.sftp, .sftp):
+            throw CPKError.unsupportedTransfer(
+                "SFTP-to-SFTP copy is not wired through the companion boundary yet."
+            )
+        }
+    }
+
+    private func parseEntries(_ data: Data) throws -> [CPKEntry] {
         guard let text = String(data: data, encoding: .utf8) else {
             throw CPKError.commandFailed("cpk returned non-UTF-8 output")
         }
 
         return text.split(separator: "\n").compactMap { line in
-            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            let fields = line.split(
+                separator: "\t",
+                maxSplits: 2,
+                omittingEmptySubsequences: false
+            )
             guard fields.count == 3 else { return nil }
 
             let kind = String(fields[0])
@@ -68,27 +202,6 @@ final class CPKClient {
                 size: size
             )
         }
-    }
-
-
-    func createDirectory(path: String) throws {
-        _ = try run(["local-mkdir", path])
-    }
-
-    func rename(source: String, destination: String) throws {
-        _ = try run(["local-rename", source, destination])
-    }
-
-    func remove(path: String) throws {
-        _ = try run(["local-rm", path])
-    }
-
-    func copySafe(source: String, destination: String) throws {
-        _ = try run(["local-copy-safe", source, destination])
-    }
-
-    func copyTreeSafe(source: String, destination: String) throws {
-        _ = try run(["local-copy-tree-safe", source, destination])
     }
 
     private func run(_ arguments: [String]) throws -> Data {
@@ -108,7 +221,9 @@ final class CPKClient {
         if process.terminationStatus != 0 {
             let errorData = errors.fileHandleForReading.readDataToEndOfFile()
             let message = String(data: errorData, encoding: .utf8) ?? "cpk command failed"
-            throw CPKError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw CPKError.commandFailed(
+                message.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
         }
         return data
     }

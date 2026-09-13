@@ -1,8 +1,7 @@
+use crate::connection::PaneConnection;
 use adw::prelude::*;
 use cyber_pumpkin_application::PaneSession;
-use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind, FileEntry};
-use cyber_pumpkin_local::LocalBackend;
 use gtk::Orientation;
 use gtk::gio;
 use std::cell::{Cell, RefCell};
@@ -25,6 +24,7 @@ pub(crate) enum SortMode {
 
 #[derive(Clone)]
 struct PaneWidgets {
+    heading: gtk::Label,
     path: gtk::Entry,
     list: gtk::ListBox,
     back: gtk::Button,
@@ -37,6 +37,7 @@ struct PaneWidgets {
 pub(crate) struct PaneHandle {
     pub(crate) root: gtk::Box,
     session: Rc<RefCell<PaneSession>>,
+    connection: Rc<RefCell<PaneConnection>>,
     entries: Rc<RefCell<Vec<FileEntry>>>,
     show_hidden: Rc<Cell<bool>>,
     sort_mode: Rc<Cell<SortMode>>,
@@ -50,7 +51,16 @@ pub(crate) fn build_pane(
     side: PaneSide,
     active: &Rc<Cell<PaneSide>>,
 ) -> PaneHandle {
-    let session = create_session(initial_path);
+    let backend_id = match side {
+        PaneSide::Left => "pane-left",
+        PaneSide::Right => "pane-right",
+    };
+    let connection = PaneConnection::local(backend_id).unwrap_or_else(|error| {
+        eprintln!("failed to create local pane connection: {error}");
+        std::process::exit(1);
+    });
+    let session = create_session(connection.backend_id(), initial_path);
+    let connection = Rc::new(RefCell::new(connection));
     let entries = Rc::new(RefCell::new(Vec::new()));
     let show_hidden = Rc::new(Cell::new(false));
     let sort_mode = Rc::new(Cell::new(SortMode::Name));
@@ -60,6 +70,7 @@ pub(crate) fn build_pane(
     let pane = PaneHandle {
         root,
         session,
+        connection,
         entries,
         show_hidden,
         sort_mode,
@@ -75,7 +86,8 @@ pub(crate) fn build_pane(
 impl PaneHandle {
     pub(crate) fn refresh(&self) {
         let current = self.session.borrow().location().clone();
-        match load_directory(&current) {
+        let connection = self.connection.borrow().clone();
+        match load_directory(&connection, &current) {
             Ok(loaded) => self.render(loaded),
             Err(error) => self
                 .widgets
@@ -116,7 +128,44 @@ impl PaneHandle {
     }
 
     pub(crate) fn backend_id(&self) -> BackendId {
-        self.session.borrow().backend().clone()
+        self.connection.borrow().backend_id()
+    }
+
+    pub(crate) fn connection(&self) -> PaneConnection {
+        self.connection.borrow().clone()
+    }
+
+    pub(crate) fn connect_sftp(
+        &self,
+        host: &str,
+        username: &str,
+        port: u16,
+        path: &str,
+    ) -> Result<(), String> {
+        let id = self.backend_id();
+        let connection = PaneConnection::sftp(id.as_str(), host, username, port)?;
+        let target = BackendPath::new(path).map_err(|error| error.to_string())?;
+        let loaded = load_directory(&connection, &target)?;
+        *self.connection.borrow_mut() = connection;
+        *self.session.borrow_mut() = PaneSession::new(self.backend_id(), target);
+        self.widgets.heading.set_text(&format!(
+            "SFTP — {}",
+            self.connection.borrow().display_name()
+        ));
+        self.render(loaded);
+        Ok(())
+    }
+
+    pub(crate) fn disconnect_to_local(&self, path: &str) -> Result<(), String> {
+        let id = self.backend_id();
+        let connection = PaneConnection::local(id.as_str())?;
+        let target = BackendPath::new(path).map_err(|error| error.to_string())?;
+        let loaded = load_directory(&connection, &target)?;
+        *self.connection.borrow_mut() = connection;
+        *self.session.borrow_mut() = PaneSession::new(self.backend_id(), target);
+        self.widgets.heading.set_text("Local");
+        self.render(loaded);
+        Ok(())
     }
 
     pub(crate) fn location(&self) -> BackendPath {
@@ -124,7 +173,7 @@ impl PaneHandle {
     }
 
     pub(crate) fn destination_child(&self, name: &str) -> Result<BackendPath, String> {
-        local_child_path(&self.location(), name)
+        child_path(&self.location(), name)
     }
 
     pub(crate) fn create_folder(&self, name: &str) {
@@ -136,7 +185,15 @@ impl PaneHandle {
             self.widgets.footer.set_text("Could not form folder path.");
             return;
         };
-        let backend = LocalBackend::new(self.backend_id());
+        let backend = match self.connection.borrow().connect_backend() {
+            Ok(backend) => backend,
+            Err(error) => {
+                self.widgets
+                    .footer
+                    .set_text(&format!("Connect failed: {error}"));
+                return;
+            }
+        };
         match backend.create_dir(&path) {
             Ok(()) => {
                 self.widgets.footer.set_text(&format!("Created {name}"));
@@ -164,7 +221,15 @@ impl PaneHandle {
                 .set_text("Could not form destination path.");
             return;
         };
-        let backend = LocalBackend::new(self.backend_id());
+        let backend = match self.connection.borrow().connect_backend() {
+            Ok(backend) => backend,
+            Err(error) => {
+                self.widgets
+                    .footer
+                    .set_text(&format!("Connect failed: {error}"));
+                return;
+            }
+        };
         match backend.rename(&entry.path, &destination) {
             Ok(()) => {
                 self.widgets
@@ -184,7 +249,15 @@ impl PaneHandle {
             self.widgets.footer.set_text("Select an item to delete.");
             return;
         };
-        let backend = LocalBackend::new(self.backend_id());
+        let backend = match self.connection.borrow().connect_backend() {
+            Ok(backend) => backend,
+            Err(error) => {
+                self.widgets
+                    .footer
+                    .set_text(&format!("Connect failed: {error}"));
+                return;
+            }
+        };
         match backend.remove(&entry.path) {
             Ok(()) => {
                 self.widgets
@@ -321,7 +394,8 @@ impl PaneHandle {
     }
 
     fn navigate_to(&self, target: BackendPath) {
-        match load_directory(&target) {
+        let connection = self.connection.borrow().clone();
+        match load_directory(&connection, &target) {
             Ok(loaded) => {
                 self.session.borrow_mut().navigate_to(target);
                 self.render(loaded);
@@ -337,7 +411,8 @@ impl PaneHandle {
         let Some(target) = self.session.borrow().back_location().cloned() else {
             return;
         };
-        let Ok(loaded) = load_directory(&target) else {
+        let connection = self.connection.borrow().clone();
+        let Ok(loaded) = load_directory(&connection, &target) else {
             return;
         };
         let _changed = self.session.borrow_mut().go_back();
@@ -348,7 +423,8 @@ impl PaneHandle {
         let Some(target) = self.session.borrow().forward_location().cloned() else {
             return;
         };
-        let Ok(loaded) = load_directory(&target) else {
+        let connection = self.connection.borrow().clone();
+        let Ok(loaded) = load_directory(&connection, &target) else {
             return;
         };
         let _changed = self.session.borrow_mut().go_forward();
@@ -426,16 +502,12 @@ fn invalid_name(name: &str) -> bool {
     name.is_empty() || name.contains('/')
 }
 
-fn create_session(initial_path: &str) -> Rc<RefCell<PaneSession>> {
+fn create_session(backend: BackendId, initial_path: &str) -> Rc<RefCell<PaneSession>> {
     let initial = BackendPath::new(initial_path).unwrap_or_else(|_| {
         BackendPath::new("/").unwrap_or_else(|error| {
             eprintln!("failed to create root backend path: {error}");
             std::process::exit(1);
         })
-    });
-    let backend = BackendId::new("local-ui").unwrap_or_else(|error| {
-        eprintln!("failed to create local backend id: {error}");
-        std::process::exit(1);
     });
     Rc::new(RefCell::new(PaneSession::new(backend, initial)))
 }
@@ -473,6 +545,7 @@ fn create_widgets(title: &str) -> (gtk::Box, PaneWidgets) {
     (
         pane,
         PaneWidgets {
+            heading,
             path,
             list,
             back,
@@ -613,7 +686,7 @@ pub(crate) fn format_size(size: Option<u64>) -> String {
     }
 }
 
-fn local_child_path(directory: &BackendPath, name: &str) -> Result<BackendPath, String> {
+fn child_path(directory: &BackendPath, name: &str) -> Result<BackendPath, String> {
     let child = Path::new(directory.as_str()).join(name);
     let text = child
         .to_str()
@@ -621,9 +694,12 @@ fn local_child_path(directory: &BackendPath, name: &str) -> Result<BackendPath, 
     BackendPath::new(text).map_err(|error| error.to_string())
 }
 
-fn load_directory(path: &BackendPath) -> Result<Vec<FileEntry>, String> {
-    let id = BackendId::new("local-ui").map_err(|error| error.to_string())?;
-    LocalBackend::new(id)
+fn load_directory(
+    connection: &PaneConnection,
+    path: &BackendPath,
+) -> Result<Vec<FileEntry>, String> {
+    connection
+        .connect_backend()?
         .list(path)
         .map_err(|error| error.to_string())
 }

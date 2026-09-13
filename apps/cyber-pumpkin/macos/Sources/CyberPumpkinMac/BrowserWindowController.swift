@@ -84,6 +84,21 @@ final class BrowserWindowController: NSObject {
 
         addTargetedItem(
             menu,
+            "Connect SFTP…",
+            #selector(connectSFTP),
+            "k",
+            [.command]
+        )
+        addTargetedItem(
+            menu,
+            "Disconnect to Local",
+            #selector(disconnectToLocal),
+            "",
+            []
+        )
+        menu.addItem(.separator())
+        addTargetedItem(
+            menu,
             "New Folder…",
             #selector(newFolder),
             "n",
@@ -309,6 +324,16 @@ final class BrowserWindowController: NSObject {
             target: self,
             action: #selector(refreshActive)
         )
+        let connect = NSButton(
+            title: "Connect",
+            target: self,
+            action: #selector(connectSFTP)
+        )
+        let local = NSButton(
+            title: "Local",
+            target: self,
+            action: #selector(disconnectToLocal)
+        )
         let newFolder = NSButton(
             title: "New Folder",
             target: self,
@@ -362,7 +387,7 @@ final class BrowserWindowController: NSObject {
 
         status.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [
-            refresh, newFolder, info, rename, delete,
+            refresh, connect, local, newFolder, info, rename, delete,
             copyLeft, copyRight, hidden, activityButton,
             sort, reverse, status
         ])
@@ -419,6 +444,63 @@ final class BrowserWindowController: NSObject {
         status.stringValue = "Refreshed \(activePane.currentPath)"
     }
 
+    @objc private func connectSFTP() {
+        let alert = NSAlert()
+        alert.messageText = "Connect SFTP"
+        alert.informativeText =
+            "Uses your SSH agent and requires a matching host key in ~/.ssh/known_hosts."
+
+        let host = NSTextField(string: "")
+        host.placeholderString = "Host"
+        let username = NSTextField(string: NSUserName())
+        username.placeholderString = "Username"
+        let port = NSTextField(string: "22")
+        port.placeholderString = "Port"
+        let path = NSTextField(string: "/")
+        path.placeholderString = "Remote path"
+
+        let fields = NSStackView(views: [host, username, port, path])
+        fields.orientation = .vertical
+        fields.spacing = 6
+        fields.frame = NSRect(x: 0, y: 0, width: 320, height: 112)
+
+        alert.accessoryView = fields
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        guard let portNumber = UInt16(port.stringValue),
+              portNumber > 0,
+              !host.stringValue.isEmpty,
+              !username.stringValue.isEmpty else {
+            status.stringValue = "Invalid SFTP connection settings."
+            return
+        }
+
+        let remote = SFTPConnection(
+            host: host.stringValue,
+            username: username.stringValue,
+            port: portNumber
+        )
+
+        do {
+            try activePane.connectSFTP(remote, path: path.stringValue)
+            status.stringValue = "Connected \(remote.displayName)"
+        } catch {
+            status.stringValue =
+                "SFTP connection failed: \(error.localizedDescription)"
+        }
+    }
+
+    @objc private func disconnectToLocal() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        activePane.disconnectToLocal(path: home)
+        status.stringValue = "Returned active pane to local filesystem"
+    }
+
     @objc private func newFolder() {
         guard let name = prompt(
             title: "New Folder",
@@ -437,7 +519,10 @@ final class BrowserWindowController: NSObject {
             .path
 
         do {
-            try client.createDirectory(path: path)
+            try client.createDirectory(
+                connection: activePane.connection,
+                path: path
+            )
             activePane.reloadDirectory()
             status.stringValue = "Created \(name)"
         } catch {
@@ -468,7 +553,11 @@ final class BrowserWindowController: NSObject {
             .path
 
         do {
-            try client.rename(source: entry.path, destination: destination)
+            try client.rename(
+                connection: activePane.connection,
+                source: entry.path,
+                destination: destination
+            )
             activePane.reloadDirectory()
             status.stringValue = "Renamed \(entry.name) → \(name)"
         } catch {
@@ -493,7 +582,10 @@ final class BrowserWindowController: NSObject {
         }
 
         do {
-            try client.remove(path: entry.path)
+            try client.remove(
+                connection: activePane.connection,
+                path: entry.path
+            )
             activePane.reloadDirectory()
             status.stringValue = "Deleted \(entry.name)"
         } catch {
@@ -553,8 +645,10 @@ final class BrowserWindowController: NSObject {
             }
 
             let result = Result {
-                try self.client.copyTreeSafe(
+                try self.client.copyTree(
+                    sourceConnection: source.connection,
                     source: entry.path,
+                    destinationConnection: destination.connection,
                     destination: destinationPath
                 )
             }

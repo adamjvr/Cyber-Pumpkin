@@ -24,6 +24,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     let titleText: String
     let client: CPKClient
     private(set) var currentPath: String
+    private(set) var connection: BrowserConnection = .local
 
     var showHidden = false {
         didSet { applyFilterAndSort() }
@@ -38,6 +39,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     private let pathField = NSTextField()
     private let tableView = ContextTableView()
     private let footer = NSTextField(labelWithString: "0 items")
+    private let heading = NSTextField(labelWithString: "")
 
     init(title: String, path: String, client: CPKClient) {
         titleText = title
@@ -54,8 +56,8 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     override func loadView() {
         view = NSView()
 
-        let title = NSTextField(labelWithString: titleText)
-        title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        heading.stringValue = titleText
+        heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
 
         let up = NSButton(title: "⌃", target: self, action: #selector(goUp))
         up.toolTip = "Up"
@@ -78,7 +80,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
 
         footer.textColor = .secondaryLabelColor
 
-        let stack = NSStackView(views: [title, nav, scroll, footer])
+        let stack = NSStackView(views: [heading, nav, scroll, footer])
         stack.orientation = .vertical
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -97,12 +99,33 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
 
     func reloadDirectory() {
         do {
-            allEntries = try client.list(path: currentPath)
+            allEntries = try client.list(connection: connection, path: currentPath)
             applyFilterAndSort()
             pathField.stringValue = currentPath
+            heading.stringValue =
+                connection == .local ? titleText : connection.displayName
         } catch {
             footer.stringValue = "Load failed: \(error.localizedDescription)"
         }
+    }
+
+    func connectSFTP(_ remote: SFTPConnection, path: String) throws {
+        let entries = try client.list(connection: .sftp(remote), path: path)
+        connection = .sftp(remote)
+        currentPath = path
+        allEntries = entries
+        pathField.stringValue = currentPath
+        heading.stringValue = connection.displayName
+        applyFilterAndSort()
+        onBecameActive?()
+    }
+
+    func disconnectToLocal(path: String) {
+        connection = .local
+        currentPath = path
+        heading.stringValue = titleText
+        reloadDirectory()
+        onBecameActive?()
     }
 
     func navigate(to path: String) {

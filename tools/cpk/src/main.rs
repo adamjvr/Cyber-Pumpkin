@@ -26,6 +26,10 @@ USAGE:
   cpk sftp-ls <host> <username> <remote-path> [port]
   cpk sftp-put <local-source> <host> <username> <remote-destination> [port]
   cpk sftp-get <host> <username> <remote-source> <local-destination> [port]
+  cpk sftp-copy-tree-put <local-source> <host> <username> <remote-destination> [port]
+  cpk sftp-copy-tree-get <host> <username> <remote-source> <local-destination> [port]
+  cpk sftp-mkdir <host> <username> <remote-path> [port]
+  cpk sftp-rename <host> <username> <remote-source> <remote-destination> [port]
   cpk sftp-rm <host> <username> <remote-path> [port]
 
 SFTP authentication uses the SSH agent. Host keys must already match
@@ -58,6 +62,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("sftp-ls") => sftp_list_command(&mut args)?,
         Some("sftp-put") => sftp_put_command(&mut args)?,
         Some("sftp-get") => sftp_get_command(&mut args)?,
+        Some("sftp-copy-tree-put") => sftp_copy_tree_put_command(&mut args)?,
+        Some("sftp-copy-tree-get") => sftp_copy_tree_get_command(&mut args)?,
+        Some("sftp-mkdir") => sftp_mkdir_command(&mut args)?,
+        Some("sftp-rename") => sftp_rename_command(&mut args)?,
         Some("sftp-rm") => sftp_remove_command(&mut args)?,
         Some("help" | "--help" | "-h") | None => println!("{USAGE}"),
         Some(other) => {
@@ -151,6 +159,49 @@ fn sftp_get_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<d
     let port = optional_port(args.next())?;
     ensure_finished(args)?;
     sftp_get(&host, &username, &source, &destination, port)
+}
+
+fn sftp_copy_tree_put_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let source = next_arg(args, "local-source")?;
+    let host = next_arg(args, "host")?;
+    let username = next_arg(args, "username")?;
+    let destination = next_arg(args, "remote-destination")?;
+    let port = optional_port(args.next())?;
+    ensure_finished(args)?;
+    sftp_copy_tree_put(&source, &host, &username, &destination, port)
+}
+
+fn sftp_copy_tree_get_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let host = next_arg(args, "host")?;
+    let username = next_arg(args, "username")?;
+    let source = next_arg(args, "remote-source")?;
+    let destination = next_arg(args, "local-destination")?;
+    let port = optional_port(args.next())?;
+    ensure_finished(args)?;
+    sftp_copy_tree_get(&host, &username, &source, &destination, port)
+}
+
+fn sftp_mkdir_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let host = next_arg(args, "host")?;
+    let username = next_arg(args, "username")?;
+    let path = next_arg(args, "remote-path")?;
+    let port = optional_port(args.next())?;
+    ensure_finished(args)?;
+    sftp_mkdir(&host, &username, &path, port)
+}
+
+fn sftp_rename_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let host = next_arg(args, "host")?;
+    let username = next_arg(args, "username")?;
+    let source = next_arg(args, "remote-source")?;
+    let destination = next_arg(args, "remote-destination")?;
+    let port = optional_port(args.next())?;
+    ensure_finished(args)?;
+    sftp_rename(&host, &username, &source, &destination, port)
 }
 
 fn sftp_remove_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
@@ -368,6 +419,92 @@ fn print_entry(entry: &FileEntry) {
         .size
         .map_or_else(|| "-".to_owned(), |value| value.to_string());
     println!("{:?}\t{size}\t{}", entry.kind, entry.path.as_str());
+}
+
+fn sftp_copy_tree_put(
+    source: &str,
+    host: &str,
+    username: &str,
+    destination: &str,
+    port: u16,
+) -> Result<(), Box<dyn Error>> {
+    let local = local_backend()?;
+    let remote = remote_backend(host, username, port)?;
+    let spec = TransferSpec {
+        source: Endpoint {
+            backend: local.id().clone(),
+            path: BackendPath::new(source)?,
+        },
+        destination: Endpoint {
+            backend: remote.id().clone(),
+            path: BackendPath::new(destination)?,
+        },
+    };
+    run_tree_copy(&spec, &local, &remote)
+}
+
+fn sftp_copy_tree_get(
+    host: &str,
+    username: &str,
+    source: &str,
+    destination: &str,
+    port: u16,
+) -> Result<(), Box<dyn Error>> {
+    let remote = remote_backend(host, username, port)?;
+    let local = local_backend()?;
+    let spec = TransferSpec {
+        source: Endpoint {
+            backend: remote.id().clone(),
+            path: BackendPath::new(source)?,
+        },
+        destination: Endpoint {
+            backend: local.id().clone(),
+            path: BackendPath::new(destination)?,
+        },
+    };
+    run_tree_copy(&spec, &remote, &local)
+}
+
+fn run_tree_copy(
+    spec: &TransferSpec,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+) -> Result<(), Box<dyn Error>> {
+    let cancellation = CancellationToken::new();
+    match execute_tree_controlled(spec, source, destination, &cancellation, |_| {})? {
+        TreeTransferOutcome::Completed(report) => {
+            println!(
+                "copied {} files, {} directories, {} bytes",
+                report.files_copied(),
+                report.directories_created(),
+                report.bytes_copied()
+            );
+            Ok(())
+        }
+        TreeTransferOutcome::Cancelled(_) => {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "tree copy was cancelled").into())
+        }
+    }
+}
+
+fn sftp_mkdir(host: &str, username: &str, path: &str, port: u16) -> Result<(), Box<dyn Error>> {
+    let backend = remote_backend(host, username, port)?;
+    backend.create_dir(&BackendPath::new(path)?)?;
+    println!("created {path}");
+    Ok(())
+}
+
+fn sftp_rename(
+    host: &str,
+    username: &str,
+    source: &str,
+    destination: &str,
+    port: u16,
+) -> Result<(), Box<dyn Error>> {
+    let backend = remote_backend(host, username, port)?;
+    backend.rename(&BackendPath::new(source)?, &BackendPath::new(destination)?)?;
+    println!("renamed {source} -> {destination}");
+    Ok(())
 }
 
 fn sftp_remove(host: &str, username: &str, path: &str, port: u16) -> Result<(), Box<dyn Error>> {
