@@ -1,8 +1,22 @@
 //! Shared application/session state for Cyber-Pumpkin frontends.
 
+mod preferences;
+mod profiles;
+
+pub use preferences::{
+    AdvancedPreferences, AppPreferences, DoubleClickAction, ExistingItemAction, FilePreferences,
+    TransferPreferences, default_preferences_path,
+};
+pub use profiles::{
+    ConnectionProfiles, SavedConnection, application_support_directory, default_profiles_path,
+};
+
 use cyber_pumpkin_core::{BackendId, BackendPath};
 
-/// Backend-agnostic state for one browser pane.
+/// Navigation state for one browser pane.
+///
+/// The session owns backend identity, current location, and independent
+/// back/forward history.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaneSession {
     backend: BackendId,
@@ -23,43 +37,43 @@ impl PaneSession {
         }
     }
 
-    /// Returns the configured backend identifier.
+    /// Returns the backend associated with this pane session.
     #[must_use]
     pub const fn backend(&self) -> &BackendId {
         &self.backend
     }
 
-    /// Returns the current backend location.
+    /// Returns the pane's current backend path.
     #[must_use]
     pub const fn location(&self) -> &BackendPath {
         &self.location
     }
 
-    /// Returns whether Back can navigate.
+    /// Returns whether backward history is available.
     #[must_use]
     pub fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }
 
-    /// Returns whether Forward can navigate.
+    /// Returns whether forward history is available.
     #[must_use]
     pub fn can_go_forward(&self) -> bool {
         !self.forward.is_empty()
     }
 
-    /// Returns the location Back would select.
+    /// Returns the location that would be reached by going back.
     #[must_use]
     pub fn back_location(&self) -> Option<&BackendPath> {
         self.back.last()
     }
 
-    /// Returns the location Forward would select.
+    /// Returns the location that would be reached by going forward.
     #[must_use]
     pub fn forward_location(&self) -> Option<&BackendPath> {
         self.forward.last()
     }
 
-    /// Navigates to a new location and records history.
+    /// Navigates to a new location and clears forward history.
     pub fn navigate_to(&mut self, destination: BackendPath) {
         if destination == self.location {
             return;
@@ -69,9 +83,7 @@ impl PaneSession {
         self.forward.clear();
     }
 
-    /// Moves to the previous location when available.
-    ///
-    /// Returns `true` when the location changed.
+    /// Moves to the previous location, returning whether navigation occurred.
     pub fn go_back(&mut self) -> bool {
         let Some(previous) = self.back.pop() else {
             return false;
@@ -81,9 +93,7 @@ impl PaneSession {
         true
     }
 
-    /// Moves to the next location when available.
-    ///
-    /// Returns `true` when the location changed.
+    /// Moves to the next location, returning whether navigation occurred.
     pub fn go_forward(&mut self) -> bool {
         let Some(next) = self.forward.pop() else {
             return false;

@@ -369,6 +369,7 @@ impl SftpBackend {
             name,
             kind,
             size: remote_type.is_file().then_some(stat.size).flatten(),
+            modified: stat.mtime,
         })
     }
 

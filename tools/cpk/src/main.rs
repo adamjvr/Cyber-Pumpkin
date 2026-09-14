@@ -1,5 +1,6 @@
 //! Cyber-Pumpkin command-line companion.
 
+use cyber_pumpkin_application::{ConnectionProfiles, SavedConnection};
 use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, FileEntry};
 use cyber_pumpkin_local::LocalBackend;
@@ -23,6 +24,9 @@ USAGE:
   cpk local-mkdir <path>
   cpk local-rename <source> <destination>
   cpk local-rm <path>
+  cpk profile-list
+  cpk profile-add <id> <name> <host> <username> <port> <remote-path>
+  cpk profile-rm <id>
   cpk sftp-ls <host> <username> <remote-path> [port]
   cpk sftp-put <local-source> <host> <username> <remote-destination> [port]
   cpk sftp-get <host> <username> <remote-source> <local-destination> [port]
@@ -59,6 +63,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("local-mkdir") => local_mkdir_command(&mut args)?,
         Some("local-rename") => local_rename_command(&mut args)?,
         Some("local-rm") => local_remove_command(&mut args)?,
+        Some("profile-list") => profile_list_command(&mut args)?,
+        Some("profile-add") => profile_add_command(&mut args)?,
+        Some("profile-rm") => profile_remove_command(&mut args)?,
         Some("sftp-ls") => sftp_list_command(&mut args)?,
         Some("sftp-put") => sftp_put_command(&mut args)?,
         Some("sftp-get") => sftp_get_command(&mut args)?,
@@ -130,6 +137,53 @@ fn local_remove_command(args: &mut impl Iterator<Item = String>) -> Result<(), B
     let path = next_arg(args, "path")?;
     ensure_finished(args)?;
     local_remove(&path)
+}
+
+fn profile_list_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    ensure_finished(args)?;
+    for profile in ConnectionProfiles::load_default()?.profiles {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            profile.id,
+            profile.name,
+            profile.host,
+            profile.username,
+            profile.port,
+            profile.initial_path
+        );
+    }
+    Ok(())
+}
+
+fn profile_add_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let id = next_arg(args, "id")?;
+    let name = next_arg(args, "name")?;
+    let host = next_arg(args, "host")?;
+    let username = next_arg(args, "username")?;
+    let port = next_arg(args, "port")?.parse::<u16>()?;
+    let path = next_arg(args, "remote-path")?;
+    ensure_finished(args)?;
+
+    let profile = SavedConnection::new(id, name, host, username, port, path)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut profiles = ConnectionProfiles::load_default()?;
+    profiles.upsert(profile);
+    profiles.save_default()?;
+    println!("saved connection");
+    Ok(())
+}
+
+fn profile_remove_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let id = next_arg(args, "id")?;
+    ensure_finished(args)?;
+    let mut profiles = ConnectionProfiles::load_default()?;
+    if profiles.remove(&id) {
+        profiles.save_default()?;
+        println!("removed {id}");
+    } else {
+        println!("connection not found: {id}");
+    }
+    Ok(())
 }
 
 fn sftp_list_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
@@ -418,7 +472,14 @@ fn print_entry(entry: &FileEntry) {
     let size = entry
         .size
         .map_or_else(|| "-".to_owned(), |value| value.to_string());
-    println!("{:?}\t{size}\t{}", entry.kind, entry.path.as_str());
+    let modified = entry
+        .modified
+        .map_or_else(|| "-".to_owned(), |value| value.to_string());
+    println!(
+        "{:?}\t{size}\t{modified}\t{}",
+        entry.kind,
+        entry.path.as_str()
+    );
 }
 
 fn sftp_copy_tree_put(

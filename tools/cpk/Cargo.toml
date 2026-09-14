@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cyber-pumpkin-application = { path = "../../sdk/application/cyber-pumpkin-application" }
 cyber-pumpkin-backend = { path = "../../sdk/filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { path = "../../sdk/foundation/cyber-pumpkin-core" }
 cyber-pumpkin-local = { path = "../../sdk/filesystem/cyber-pumpkin-local" }

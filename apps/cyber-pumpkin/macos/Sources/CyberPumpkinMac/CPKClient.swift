@@ -5,8 +5,22 @@ struct CPKEntry {
     let name: String
     let kind: String
     let size: UInt64?
+    let modified: UInt64?
 
     var isDirectory: Bool { kind == "Directory" }
+}
+
+struct CPKSavedProfile {
+    let id: String
+    let name: String
+    let host: String
+    let username: String
+    let port: UInt16
+    let path: String
+
+    var remote: SFTPConnection {
+        SFTPConnection(host: host, username: username, port: port)
+    }
 }
 
 struct SFTPConnection: Equatable {
@@ -71,6 +85,49 @@ final class CPKClient {
             throw CPKError.binaryNotFound
         }
         binary = found
+    }
+
+    func profiles() throws -> [CPKSavedProfile] {
+        let data = try run(["profile-list"])
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw CPKError.commandFailed("cpk returned non-UTF-8 profile data")
+        }
+
+        return text.split(separator: "\n").compactMap { line in
+            let fields = line.split(
+                separator: "\t",
+                maxSplits: 5,
+                omittingEmptySubsequences: false
+            )
+            guard fields.count == 6,
+                  let port = UInt16(fields[4]) else {
+                return nil
+            }
+            return CPKSavedProfile(
+                id: String(fields[0]),
+                name: String(fields[1]),
+                host: String(fields[2]),
+                username: String(fields[3]),
+                port: port,
+                path: String(fields[5])
+            )
+        }
+    }
+
+    func saveProfile(_ profile: CPKSavedProfile) throws {
+        _ = try run([
+            "profile-add",
+            profile.id,
+            profile.name,
+            profile.host,
+            profile.username,
+            String(profile.port),
+            profile.path
+        ])
+    }
+
+    func removeProfile(id: String) throws {
+        _ = try run(["profile-rm", id])
     }
 
     func list(connection: BrowserConnection, path: String) throws -> [CPKEntry] {
@@ -185,21 +242,23 @@ final class CPKClient {
         return text.split(separator: "\n").compactMap { line in
             let fields = line.split(
                 separator: "\t",
-                maxSplits: 2,
+                maxSplits: 3,
                 omittingEmptySubsequences: false
             )
-            guard fields.count == 3 else { return nil }
+            guard fields.count == 4 else { return nil }
 
             let kind = String(fields[0])
             let size = fields[1] == "-" ? nil : UInt64(fields[1])
-            let fullPath = String(fields[2])
+            let modified = fields[2] == "-" ? nil : UInt64(fields[2])
+            let fullPath = String(fields[3])
             let name = URL(fileURLWithPath: fullPath).lastPathComponent
 
             return CPKEntry(
                 path: fullPath,
                 name: name.isEmpty ? fullPath : name,
                 kind: kind,
-                size: size
+                size: size,
+                modified: modified
             )
         }
     }

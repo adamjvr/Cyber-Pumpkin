@@ -77,6 +77,8 @@ pub struct FileEntry {
     pub kind: EntryKind,
     /// Logical byte size when known.
     pub size: Option<u64>,
+    /// Modification time as Unix seconds when the backend provides it.
+    pub modified: Option<u64>,
 }
 
 /// Whether a backend explicitly supports an optional capability.

@@ -20,7 +20,10 @@ pub(crate) enum SortMode {
     Name,
     Type,
     Size,
+    Date,
 }
+
+type SelectionObserver = Rc<dyn Fn(Option<FileEntry>, String)>;
 
 #[derive(Clone)]
 struct PaneWidgets {
@@ -42,6 +45,8 @@ pub(crate) struct PaneHandle {
     show_hidden: Rc<Cell<bool>>,
     sort_mode: Rc<Cell<SortMode>>,
     sort_descending: Rc<Cell<bool>>,
+    filter_query: Rc<RefCell<String>>,
+    selection_observer: Rc<RefCell<Option<SelectionObserver>>>,
     widgets: PaneWidgets,
 }
 
@@ -65,6 +70,8 @@ pub(crate) fn build_pane(
     let show_hidden = Rc::new(Cell::new(false));
     let sort_mode = Rc::new(Cell::new(SortMode::Name));
     let sort_descending = Rc::new(Cell::new(false));
+    let filter_query = Rc::new(RefCell::new(String::new()));
+    let selection_observer = Rc::new(RefCell::new(None));
     let (root, widgets) = create_widgets(title);
 
     let pane = PaneHandle {
@@ -75,6 +82,8 @@ pub(crate) fn build_pane(
         show_hidden,
         sort_mode,
         sort_descending,
+        filter_query,
+        selection_observer,
         widgets,
     };
     pane.connect_navigation(side, active);
@@ -121,6 +130,11 @@ impl PaneHandle {
         self.refresh();
     }
 
+    pub(crate) fn set_filter_query(&self, query: &str) {
+        *self.filter_query.borrow_mut() = query.trim().to_lowercase();
+        self.refresh();
+    }
+
     pub(crate) fn selected_entry(&self) -> Option<FileEntry> {
         let row = self.widgets.list.selected_row()?;
         let index = usize::try_from(row.index()).ok()?;
@@ -133,6 +147,24 @@ impl PaneHandle {
 
     pub(crate) fn connection(&self) -> PaneConnection {
         self.connection.borrow().clone()
+    }
+
+    pub(crate) fn connection_display_name(&self) -> String {
+        self.connection.borrow().display_name()
+    }
+
+    pub(crate) fn set_selection_observer<F>(&self, observer: F)
+    where
+        F: Fn(Option<FileEntry>, String) + 'static,
+    {
+        *self.selection_observer.borrow_mut() = Some(Rc::new(observer));
+        self.notify_selection(None);
+    }
+
+    fn notify_selection(&self, entry: Option<FileEntry>) {
+        if let Some(observer) = self.selection_observer.borrow().as_ref() {
+            observer(entry, self.connection_display_name());
+        }
     }
 
     pub(crate) fn connect_sftp(
@@ -351,6 +383,7 @@ impl PaneHandle {
                 active.set(side);
                 let Some(row) = row else {
                     pane.update_footer();
+                    pane.notify_selection(None);
                     return;
                 };
                 let Ok(index) = usize::try_from(row.index()) else {
@@ -364,6 +397,7 @@ impl PaneHandle {
                     entry.name,
                     format_size(entry.size)
                 ));
+                pane.notify_selection(Some(entry));
             });
     }
 
@@ -448,9 +482,13 @@ impl PaneHandle {
         }
 
         let show_hidden = self.show_hidden.get();
+        let filter_query = self.filter_query.borrow().clone();
         let mut visible: Vec<FileEntry> = loaded
             .into_iter()
             .filter(|entry| show_hidden || !entry.name.starts_with('.'))
+            .filter(|entry| {
+                filter_query.is_empty() || entry.name.to_lowercase().contains(&filter_query)
+            })
             .collect();
         sort_entries(
             &mut visible,
@@ -467,6 +505,7 @@ impl PaneHandle {
         *self.entries.borrow_mut() = visible;
         self.update_navigation_widgets();
         self.update_footer();
+        self.notify_selection(None);
     }
 
     fn update_navigation_widgets(&self) {
@@ -491,8 +530,13 @@ impl PaneHandle {
         } else {
             "ascending"
         };
+        let filtered = if self.filter_query.borrow().is_empty() {
+            ""
+        } else {
+            " • filtered"
+        };
         self.widgets.footer.set_text(&format!(
-            "{count} items{hidden} • {} {order}",
+            "{count} items{hidden}{filtered} • {} {order}",
             sort_mode_text(self.sort_mode.get())
         ));
     }
@@ -513,23 +557,35 @@ fn create_session(backend: BackendId, initial_path: &str) -> Rc<RefCell<PaneSess
 }
 
 fn create_widgets(title: &str) -> (gtk::Box, PaneWidgets) {
-    let pane = gtk::Box::new(Orientation::Vertical, 6);
-    pane.set_margin_top(8);
-    pane.set_margin_bottom(8);
-    pane.set_margin_start(8);
-    pane.set_margin_end(8);
+    let pane = gtk::Box::new(Orientation::Vertical, 0);
 
+    let location_band = gtk::Box::new(Orientation::Horizontal, 6);
+    location_band.set_margin_top(4);
+    location_band.set_margin_bottom(4);
+    location_band.set_margin_start(8);
+    location_band.set_margin_end(8);
+
+    let location_icon = gtk::Image::from_icon_name("drive-harddisk-symbolic");
+    location_icon.set_pixel_size(16);
     let heading = gtk::Label::new(Some(title));
     heading.set_xalign(0.0);
+    heading.set_hexpand(true);
     heading.add_css_class("heading");
-    pane.append(&heading);
+    let view_icon = gtk::Image::from_icon_name("view-list-symbolic");
+    view_icon.add_css_class("dim-label");
+    location_band.append(&location_icon);
+    location_band.append(&heading);
+    location_band.append(&view_icon);
+    pane.append(&location_band);
 
     let (nav, path, back, forward, up) = create_navigation_row();
     pane.append(&nav);
+    pane.append(&gtk::Separator::new(Orientation::Horizontal));
     pane.append(&create_column_header());
 
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::Single);
+    list.add_css_class("navigation-sidebar");
     let scroll = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
@@ -539,6 +595,9 @@ fn create_widgets(title: &str) -> (gtk::Box, PaneWidgets) {
 
     let footer = gtk::Label::new(Some("0 items"));
     footer.set_xalign(0.0);
+    footer.set_margin_top(3);
+    footer.set_margin_bottom(4);
+    footer.set_margin_start(8);
     footer.add_css_class("dim-label");
     pane.append(&footer);
 
@@ -557,16 +616,20 @@ fn create_widgets(title: &str) -> (gtk::Box, PaneWidgets) {
 }
 
 fn create_navigation_row() -> (gtk::Box, gtk::Entry, gtk::Button, gtk::Button, gtk::Button) {
-    let nav = gtk::Box::new(Orientation::Horizontal, 4);
-    let back = gtk::Button::from_icon_name("go-previous-symbolic");
-    let forward = gtk::Button::from_icon_name("go-next-symbolic");
-    let up = gtk::Button::from_icon_name("go-up-symbolic");
-    back.set_tooltip_text(Some("Back"));
-    forward.set_tooltip_text(Some("Forward"));
-    up.set_tooltip_text(Some("Up"));
+    let nav = gtk::Box::new(Orientation::Horizontal, 3);
+    nav.set_margin_top(3);
+    nav.set_margin_bottom(4);
+    nav.set_margin_start(8);
+    nav.set_margin_end(8);
+
+    let back = compact_icon_button("go-previous-symbolic", "Back");
+    let forward = compact_icon_button("go-next-symbolic", "Forward");
+    let up = compact_icon_button("go-up-symbolic", "Up");
 
     let path = gtk::Entry::new();
     path.set_hexpand(true);
+    path.set_placeholder_text(Some("Location"));
+    path.add_css_class("flat");
     nav.append(&back);
     nav.append(&forward);
     nav.append(&up);
@@ -574,46 +637,102 @@ fn create_navigation_row() -> (gtk::Box, gtk::Entry, gtk::Button, gtk::Button, g
     (nav, path, back, forward, up)
 }
 
+fn compact_icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.set_tooltip_text(Some(tooltip));
+    button.add_css_class("flat");
+    button
+}
+
 fn create_column_header() -> gtk::Grid {
-    let grid = gtk::Grid::builder().column_spacing(12).build();
+    let grid = gtk::Grid::builder().column_spacing(8).build();
+    grid.set_margin_top(3);
+    grid.set_margin_bottom(3);
+    grid.set_margin_start(4);
+    grid.set_margin_end(4);
     let name = column_label("Name", 0.0);
-    let kind = column_label("Type", 0.0);
     let size = column_label("Size", 1.0);
+    let date = column_label("Date", 0.0);
     name.set_hexpand(true);
-    kind.set_width_chars(10);
-    size.set_width_chars(12);
+    size.set_width_chars(10);
+    date.set_width_chars(18);
     grid.attach(&name, 0, 0, 1, 1);
-    grid.attach(&kind, 1, 0, 1, 1);
-    grid.attach(&size, 2, 0, 1, 1);
+    grid.attach(&size, 1, 0, 1, 1);
+    grid.attach(&date, 2, 0, 1, 1);
     grid.add_css_class("heading");
     grid
 }
 
 fn entry_grid(entry: &FileEntry) -> gtk::Grid {
-    let grid = gtk::Grid::builder().column_spacing(12).build();
+    let grid = gtk::Grid::builder().column_spacing(8).build();
+    grid.set_margin_start(4);
+    grid.set_margin_end(4);
+    grid.set_margin_top(1);
+    grid.set_margin_bottom(1);
+
+    let identity = gtk::Box::new(Orientation::Horizontal, 6);
+    let icon = gtk::Image::from_icon_name(entry_icon_name(entry.kind));
+    icon.set_pixel_size(16);
     let name = column_label(&entry.name, 0.0);
-    let kind = column_label(entry_kind_text(entry.kind), 0.0);
-    let size = column_label(&format_size(entry.size), 1.0);
     name.set_hexpand(true);
-    kind.set_width_chars(10);
-    size.set_width_chars(12);
-    grid.attach(&name, 0, 0, 1, 1);
-    grid.attach(&kind, 1, 0, 1, 1);
-    grid.attach(&size, 2, 0, 1, 1);
-    grid.set_margin_top(4);
-    grid.set_margin_bottom(4);
+    identity.append(&icon);
+    identity.append(&name);
+    identity.set_hexpand(true);
+
+    let size = column_label(&format_size(entry.size), 1.0);
+    size.set_width_chars(10);
+    size.add_css_class("dim-label");
+    let date = column_label(&format_modified(entry.modified), 0.0);
+    date.set_width_chars(18);
+    date.add_css_class("dim-label");
+
+    grid.attach(&identity, 0, 0, 1, 1);
+    grid.attach(&size, 1, 0, 1, 1);
+    grid.attach(&date, 2, 0, 1, 1);
     grid
 }
 
 fn column_label(text: &str, xalign: f32) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_xalign(xalign);
-    label.set_margin_start(8);
-    label.set_margin_end(8);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label
 }
 
-const fn entry_kind_text(kind: EntryKind) -> &'static str {
+fn entry_icon_name(kind: EntryKind) -> &'static str {
+    match kind {
+        EntryKind::File => "text-x-generic-symbolic",
+        EntryKind::Directory => "folder-symbolic",
+        EntryKind::Symlink => "emblem-symbolic-link-symbolic",
+        EntryKind::Other => "unknown-symbolic",
+    }
+}
+
+pub(crate) fn format_modified(modified: Option<u64>) -> String {
+    let Some(seconds) = modified else {
+        return "—".to_owned();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(seconds, |duration| duration.as_secs());
+    if seconds >= now {
+        return "now".to_owned();
+    }
+    let age = now - seconds;
+    if age < 3_600 {
+        format!("{}m ago", age / 60)
+    } else if age < 86_400 {
+        format!("{}h ago", age / 3_600)
+    } else if age < 2_592_000 {
+        format!("{}d ago", age / 86_400)
+    } else if age < 31_536_000 {
+        format!("{}mo ago", age / 2_592_000)
+    } else {
+        format!("{}y ago", age / 31_536_000)
+    }
+}
+
+fn entry_kind_text(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::File => "File",
         EntryKind::Directory => "Folder",
@@ -645,6 +764,11 @@ fn compare_entries(left: &FileEntry, right: &FileEntry, mode: SortMode) -> Order
             .unwrap_or_default()
             .cmp(&right.size.unwrap_or_default())
             .then_with(|| compare_names(left, right)),
+        SortMode::Date => left
+            .modified
+            .unwrap_or_default()
+            .cmp(&right.modified.unwrap_or_default())
+            .then_with(|| compare_names(left, right)),
     }
 }
 
@@ -668,6 +792,7 @@ const fn sort_mode_text(mode: SortMode) -> &'static str {
         SortMode::Name => "name",
         SortMode::Type => "type",
         SortMode::Size => "size",
+        SortMode::Date => "date",
     }
 }
 

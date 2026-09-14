@@ -75,6 +75,11 @@ impl LocalBackend {
             name,
             kind,
             size: file_type.is_file().then_some(metadata.len()),
+            modified: metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs()),
         })
     }
 

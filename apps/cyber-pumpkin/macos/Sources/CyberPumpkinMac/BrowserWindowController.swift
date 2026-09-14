@@ -8,6 +8,14 @@ final class BrowserWindowController: NSObject {
     private var activePane: PaneViewController
     private let status = NSTextField(labelWithString: "Ready")
     private let activity = NSTextField(labelWithString: "No transfer activity yet.")
+    private let savedConnections = NSStackView()
+    private let inspectorName = NSTextField(labelWithString: "No Selection")
+    private let inspectorKind = NSTextField(labelWithString: "—")
+    private let inspectorSize = NSTextField(labelWithString: "—")
+    private let inspectorModified = NSTextField(labelWithString: "—")
+    private let inspectorBackend = NSTextField(labelWithString: "—")
+    private let inspectorPath = NSTextField(wrappingLabelWithString: "—")
+    private var preferencesController: PreferencesWindowController?
     private var reverseSort = false
 
     init(client: CPKClient) {
@@ -33,6 +41,15 @@ final class BrowserWindowController: NSObject {
         right.onBecameActive = { [weak self] in
             guard let self else { return }
             self.activePane = self.right
+        }
+
+        left.onSelectionChanged = { [weak self] entry, connection in
+            guard let self, self.activePane === self.left else { return }
+            self.updateInspector(entry: entry, connection: connection)
+        }
+        right.onSelectionChanged = { [weak self] entry, connection in
+            guard let self, self.activePane === self.right else { return }
+            self.updateInspector(entry: entry, connection: connection)
         }
 
         configureWindow()
@@ -66,6 +83,13 @@ final class BrowserWindowController: NSObject {
             #selector(showAbout),
             "",
             []
+        )
+        addTargetedItem(
+            menu,
+            "Preferences…",
+            #selector(showPreferences),
+            ",",
+            [.command]
         )
         menu.addItem(.separator())
         menu.addItem(
@@ -255,6 +279,12 @@ final class BrowserWindowController: NSObject {
         return menu
     }
 
+    private func separator() -> NSBox {
+        let box = NSBox()
+        box.boxType = .separator
+        return box
+    }
+
     private func addTargetedItem(
         _ menu: NSMenu,
         _ title: String,
@@ -288,15 +318,24 @@ final class BrowserWindowController: NSObject {
 
         let sidebar = buildSidebar()
         let browser = buildBrowserContent()
+        let inspector = buildInspector()
+
+        let workspace = NSSplitView()
+        workspace.isVertical = true
+        workspace.dividerStyle = .thin
+        workspace.addArrangedSubview(browser)
+        workspace.addArrangedSubview(inspector)
+        inspector.widthAnchor.constraint(equalToConstant: 270).isActive = true
 
         let split = NSSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
         split.addArrangedSubview(sidebar)
-        split.addArrangedSubview(browser)
-        sidebar.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        split.addArrangedSubview(workspace)
+        sidebar.widthAnchor.constraint(equalToConstant: 210).isActive = true
 
         window.contentView = split
+        reloadSavedConnections()
     }
 
     private func buildBrowserContent() -> NSView {
@@ -316,6 +355,64 @@ final class BrowserWindowController: NSObject {
         stack.spacing = 6
         stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         return stack
+    }
+
+    private func buildInspector() -> NSView {
+        let title = NSTextField(labelWithString: "Inspector")
+        title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+
+        inspectorName.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        inspectorPath.textColor = .secondaryLabelColor
+
+        let stack = NSStackView(views: [
+            title,
+            separator(),
+            inspectorName,
+            inspectorRow(label: "Type", value: inspectorKind),
+            inspectorRow(label: "Size", value: inspectorSize),
+            inspectorRow(label: "Modified", value: inspectorModified),
+            inspectorRow(label: "Location", value: inspectorBackend),
+            separator(),
+            NSTextField(labelWithString: "Path"),
+            inspectorPath
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        return stack
+    }
+
+    private func inspectorRow(label: String, value: NSTextField) -> NSView {
+        let key = NSTextField(labelWithString: label)
+        key.textColor = .secondaryLabelColor
+        key.setContentHuggingPriority(.required, for: .horizontal)
+        let row = NSStackView(views: [key, value])
+        row.orientation = .horizontal
+        row.spacing = 8
+        return row
+    }
+
+    private func updateInspector(
+        entry: CPKEntry?,
+        connection: BrowserConnection
+    ) {
+        guard let entry else {
+            inspectorName.stringValue = "No Selection"
+            inspectorKind.stringValue = "—"
+            inspectorSize.stringValue = "—"
+            inspectorModified.stringValue = "—"
+            inspectorBackend.stringValue = connection.displayName
+            inspectorPath.stringValue = "—"
+            return
+        }
+
+        inspectorName.stringValue = entry.name
+        inspectorKind.stringValue = entry.kind
+        inspectorSize.stringValue = activePane.formatSize(entry.size)
+        inspectorModified.stringValue = activePane.formatDate(entry.modified)
+        inspectorBackend.stringValue = connection.displayName
+        inspectorPath.stringValue = entry.path
     }
 
     private func buildToolbar() -> NSView {
@@ -428,6 +525,34 @@ final class BrowserWindowController: NSObject {
             stack.addArrangedSubview(button)
         }
 
+        stack.addArrangedSubview(separator())
+
+        let connectionsTitle = NSTextField(labelWithString: "Connections")
+        connectionsTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        stack.addArrangedSubview(connectionsTitle)
+
+        savedConnections.orientation = .vertical
+        savedConnections.alignment = .leading
+        savedConnections.spacing = 3
+        stack.addArrangedSubview(savedConnections)
+
+        let addConnection = NSButton(
+            title: "+ Add Connection",
+            target: self,
+            action: #selector(connectSFTP)
+        )
+        addConnection.bezelStyle = .inline
+        stack.addArrangedSubview(addConnection)
+
+        let historyTitle = NSTextField(labelWithString: "History")
+        historyTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        stack.addArrangedSubview(historyTitle)
+        let history = NSTextField(
+            wrappingLabelWithString: "Recent connections will appear here."
+        )
+        history.textColor = .secondaryLabelColor
+        stack.addArrangedSubview(history)
+
         return stack
     }
 
@@ -437,6 +562,62 @@ final class BrowserWindowController: NSObject {
 
     @objc private func openPlaceMenu(_ sender: PlaceMenuItem) {
         activePane.navigate(to: sender.path)
+    }
+
+    private func reloadSavedConnections() {
+        for view in savedConnections.arrangedSubviews {
+            savedConnections.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        let profiles = (try? client.profiles()) ?? []
+        if profiles.isEmpty {
+            let empty = NSTextField(labelWithString: "No saved connections yet.")
+            empty.textColor = .secondaryLabelColor
+            savedConnections.addArrangedSubview(empty)
+            return
+        }
+
+        for profile in profiles {
+            let button = SavedConnectionButton(
+                title: profile.name,
+                profile: profile,
+                target: self,
+                action: #selector(openSavedConnection(_:))
+            )
+            button.bezelStyle = .inline
+            button.toolTip =
+                "\(profile.username)@\(profile.host):\(profile.port)"
+            savedConnections.addArrangedSubview(button)
+        }
+    }
+
+    @objc private func openSavedConnection(_ sender: SavedConnectionButton) {
+        do {
+            try activePane.connectSFTP(
+                sender.profile.remote,
+                path: sender.profile.path
+            )
+            status.stringValue = "Connected \(sender.profile.name)"
+        } catch {
+            status.stringValue =
+                "Saved connection failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func profileID(
+        name: String,
+        host: String,
+        username: String
+    ) -> String {
+        "\(name)-\(username)-\(host)"
+            .lowercased()
+            .map { character in
+                character.isLetter || character.isNumber || character == "-"
+                    ? character
+                    : "-"
+            }
+            .reduce(into: "") { $0.append($1) }
     }
 
     @objc private func refreshActive() {
@@ -450,6 +631,8 @@ final class BrowserWindowController: NSObject {
         alert.informativeText =
             "Uses your SSH agent and requires a matching host key in ~/.ssh/known_hosts."
 
+        let displayName = NSTextField(string: "")
+        displayName.placeholderString = "Display name (optional)"
         let host = NSTextField(string: "")
         host.placeholderString = "Host"
         let username = NSTextField(string: NSUserName())
@@ -459,10 +642,17 @@ final class BrowserWindowController: NSObject {
         let path = NSTextField(string: "/")
         path.placeholderString = "Remote path"
 
-        let fields = NSStackView(views: [host, username, port, path])
+        let saveProfile = NSButton(
+            checkboxWithTitle: "Save in Pumpkin Patch",
+            target: nil,
+            action: nil
+        )
+        let fields = NSStackView(
+            views: [displayName, host, username, port, path, saveProfile]
+        )
         fields.orientation = .vertical
         fields.spacing = 6
-        fields.frame = NSRect(x: 0, y: 0, width: 320, height: 112)
+        fields.frame = NSRect(x: 0, y: 0, width: 320, height: 154)
 
         alert.accessoryView = fields
         alert.addButton(withTitle: "Connect")
@@ -488,6 +678,27 @@ final class BrowserWindowController: NSObject {
 
         do {
             try activePane.connectSFTP(remote, path: path.stringValue)
+
+            if saveProfile.state == .on {
+                let name = displayName.stringValue.isEmpty
+                    ? host.stringValue
+                    : displayName.stringValue
+                let profile = CPKSavedProfile(
+                    id: profileID(
+                        name: name,
+                        host: host.stringValue,
+                        username: username.stringValue
+                    ),
+                    name: name,
+                    host: host.stringValue,
+                    username: username.stringValue,
+                    port: portNumber,
+                    path: path.stringValue
+                )
+                try client.saveProfile(profile)
+                reloadSavedConnections()
+            }
+
             status.stringValue = "Connected \(remote.displayName)"
         } catch {
             status.stringValue =
@@ -754,8 +965,36 @@ final class BrowserWindowController: NSObject {
         !name.isEmpty && !name.contains("/")
     }
 
+    @objc private func showPreferences() {
+        let controller = PreferencesWindowController()
+        preferencesController = controller
+        controller.show()
+    }
+
     @objc private func showAbout() {
         NSApp.orderFrontStandardAboutPanel(nil)
+    }
+}
+
+final class SavedConnectionButton: NSButton {
+    let profile: CPKSavedProfile
+
+    init(
+        title: String,
+        profile: CPKSavedProfile,
+        target: AnyObject?,
+        action: Selector?
+    ) {
+        self.profile = profile
+        super.init(frame: .zero)
+        self.title = title
+        self.target = target
+        self.action = action
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
     }
 }
 

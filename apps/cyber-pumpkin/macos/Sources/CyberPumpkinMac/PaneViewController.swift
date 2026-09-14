@@ -31,6 +31,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     var onBecameActive: (() -> Void)?
+    var onSelectionChanged: ((CPKEntry?, BrowserConnection) -> Void)?
 
     private var allEntries: [CPKEntry] = []
     private var visibleEntries: [CPKEntry] = []
@@ -104,6 +105,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
             pathField.stringValue = currentPath
             heading.stringValue =
                 connection == .local ? titleText : connection.displayName
+            onSelectionChanged?(nil, connection)
         } catch {
             footer.stringValue = "Load failed: \(error.localizedDescription)"
         }
@@ -117,6 +119,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         pathField.stringValue = currentPath
         heading.stringValue = connection.displayName
         applyFilterAndSort()
+        onSelectionChanged?(nil, connection)
         onBecameActive?()
     }
 
@@ -199,9 +202,9 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private func configureTable() {
         let columns: [(String, String, CGFloat)] = [
-            ("name", "Name", 300),
-            ("kind", "Type", 90),
-            ("size", "Size", 100)
+            ("name", "Name", 320),
+            ("size", "Size", 90),
+            ("date", "Date", 150)
         ]
         for (identifier, title, width) in columns {
             let column = NSTableColumn(
@@ -232,10 +235,10 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         let value: String
 
         switch tableColumn?.identifier.rawValue {
-        case "kind":
-            value = entry.kind
         case "size":
             value = formatSize(entry.size)
+        case "date":
+            value = formatDate(entry.modified)
         default:
             value = entry.name
         }
@@ -248,11 +251,13 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
 
         guard let entry = selectedEntry() else {
             updateFooter()
+            onSelectionChanged?(nil, connection)
             return
         }
 
         footer.stringValue =
             "\(entry.name) selected • \(formatSize(entry.size))"
+        onSelectionChanged?(entry, connection)
     }
 
     @objc private func pathCommitted() {
@@ -296,4 +301,13 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         return "\(bytes / 1_073_741_824) GiB"
     }
+    func formatDate(_ modified: UInt64?) -> String {
+        guard let modified else { return "—" }
+        let date = Date(timeIntervalSince1970: TimeInterval(modified))
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
 }

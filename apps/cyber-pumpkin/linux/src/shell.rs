@@ -1,4 +1,8 @@
 use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane, format_size};
+use crate::inspector::InspectorPane;
+use crate::preferences_ui;
+use crate::pumpkin_patch::PumpkinPatch;
+use crate::server_workspace;
 use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
 use gtk::Orientation;
@@ -9,29 +13,72 @@ use std::path::Path;
 use std::rc::Rc;
 
 pub(crate) fn build_ui(app: &adw::Application) {
+    install_css();
+
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
     let active = Rc::new(Cell::new(PaneSide::Left));
-    let left = build_pane("Local A", &home, PaneSide::Left, &active);
-    let right = build_pane("Local B", &home, PaneSide::Right, &active);
+    let left = build_pane("Local", &home, PaneSide::Left, &active);
+    let right = build_pane("Local", &home, PaneSide::Right, &active);
 
     let activity_list = create_activity_list();
     let activity_revealer = create_activity_revealer(&activity_list);
     let copy_bar = build_copy_bar(&left, &right, &activity_list);
+    let inspector = InspectorPane::new();
 
-    let panes = build_panes(&left, &right);
+    {
+        let inspector = inspector.clone();
+        let active = Rc::clone(&active);
+        left.set_selection_observer(move |entry, backend| {
+            if active.get() == PaneSide::Left {
+                inspector.update(entry, &backend);
+            }
+        });
+    }
+    {
+        let inspector = inspector.clone();
+        let active = Rc::clone(&active);
+        right.set_selection_observer(move |entry, backend| {
+            if active.get() == PaneSide::Right {
+                inspector.update(entry, &backend);
+            }
+        });
+    }
+
+    let right_stack = gtk::Stack::new();
+    right_stack.set_hexpand(true);
+    right_stack.set_vexpand(true);
+    right_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    right_stack.add_titled(&right.root, Some("browser"), "Browser");
+    let servers = server_workspace::build_servers_panel(&right, &right_stack);
+    right_stack.add_titled(&servers, Some("servers"), "Servers");
+    let quick_connect = server_workspace::build_quick_connect_panel(&right, &right_stack);
+    right_stack.add_titled(&quick_connect, Some("quick-connect"), "Quick Connect");
+
+    let panes = build_panes(&left, &right_stack);
     let browser = gtk::Box::new(Orientation::Vertical, 0);
+    browser.append(&build_mode_bar(&right_stack, &left, &right, &active));
     browser.append(&build_toolbar(&left, &right, &active, &activity_revealer));
     browser.append(&copy_bar.root);
     browser.append(&panes);
     browser.append(&activity_revealer);
 
+    let browser_with_inspector = gtk::Paned::new(Orientation::Horizontal);
+    browser_with_inspector.set_position(1010);
+    browser_with_inspector.set_wide_handle(false);
+    browser_with_inspector.set_start_child(Some(&browser));
+    browser_with_inspector.set_end_child(Some(&inspector.root));
+
+    let pumpkin_patch = PumpkinPatch::new(&home, &left, &right, &active);
     let body = gtk::Paned::new(Orientation::Horizontal);
-    body.set_position(190);
-    body.set_start_child(Some(&build_pumpkin_patch(&home, &left, &right, &active)));
-    body.set_end_child(Some(&browser));
+    body.set_position(220);
+    body.set_wide_handle(false);
+    body.set_start_child(Some(&pumpkin_patch.root));
+    body.set_end_child(Some(&browser_with_inspector));
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("Cyber-Pumpkin"))));
+    let title = gtk::Label::new(Some("Cyber-Pumpkin"));
+    title.add_css_class("heading");
+    header.set_title_widget(Some(&title));
     header.pack_end(&build_menu_button());
 
     install_actions(
@@ -52,22 +99,76 @@ pub(crate) fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Cyber-Pumpkin")
-        .default_width(1380)
-        .default_height(860)
+        .default_width(1500)
+        .default_height(900)
         .content(&root)
         .build();
     window.present();
 }
 
-fn build_panes(left: &PaneHandle, right: &PaneHandle) -> gtk::Paned {
+fn build_panes(left: &PaneHandle, right: &gtk::Stack) -> gtk::Paned {
     let panes = gtk::Paned::new(Orientation::Horizontal);
     panes.set_hexpand(true);
     panes.set_vexpand(true);
-    panes.set_position(590);
-    panes.set_wide_handle(true);
+    panes.set_position(610);
+    panes.set_wide_handle(false);
     panes.set_start_child(Some(&left.root));
-    panes.set_end_child(Some(&right.root));
+    panes.set_end_child(Some(right));
     panes
+}
+
+fn build_mode_bar(
+    right_stack: &gtk::Stack,
+    left: &PaneHandle,
+    right: &PaneHandle,
+    active: &Rc<Cell<PaneSide>>,
+) -> gtk::Box {
+    let bar = gtk::Box::new(Orientation::Horizontal, 8);
+    bar.set_margin_top(4);
+    bar.set_margin_bottom(4);
+    bar.set_margin_start(8);
+    bar.set_margin_end(8);
+
+    let switcher = gtk::StackSwitcher::new();
+    switcher.set_stack(Some(right_stack));
+    switcher.set_halign(gtk::Align::Start);
+    bar.append(&switcher);
+
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    bar.append(&spacer);
+
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Search active pane"));
+    search.set_width_chars(24);
+    {
+        let left = left.clone();
+        let right = right.clone();
+        let active = Rc::clone(active);
+        search.connect_search_changed(move |entry| {
+            active_pane(&left, &right, active.get()).set_filter_query(entry.text().as_str());
+        });
+    }
+    bar.append(&search);
+    bar
+}
+
+fn install_css() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(
+        ".navigation-sidebar row { min-height: 24px; }\n\
+         .navigation-sidebar row > * { padding-top: 1px; padding-bottom: 1px; }\n\
+         .boxed-list { border-radius: 8px; }\n\
+         entry.flat { min-height: 26px; }\n\
+         .compact-toolbar button { min-height: 28px; min-width: 30px; padding: 2px 6px; }",
+    );
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 fn build_menu_button() -> gtk::MenuButton {
@@ -80,6 +181,7 @@ fn build_menu_button() -> gtk::MenuButton {
     file.append(Some("Get Info"), Some("app.info"));
     file.append(Some("Rename…"), Some("app.rename"));
     file.append(Some("Delete…"), Some("app.delete"));
+    file.append(Some("Preferences…"), Some("app.preferences"));
     menu.append_submenu(Some("File"), &file);
 
     let view = gio::Menu::new();
@@ -90,6 +192,7 @@ fn build_menu_button() -> gtk::MenuButton {
     sort.append(Some("Name"), Some("app.sort-name"));
     sort.append(Some("Type"), Some("app.sort-type"));
     sort.append(Some("Size"), Some("app.sort-size"));
+    sort.append(Some("Date"), Some("app.sort-date"));
     sort.append(Some("Reverse Order"), Some("app.sort-reverse"));
     view.append_submenu(Some("Sort By"), &sort);
     menu.append_submenu(Some("View"), &view);
@@ -128,6 +231,10 @@ fn install_actions(
     install_view_actions(app, left, right, active, activity);
     install_go_actions(app, home, left, right, active);
     install_transfer_action(app, left, right, active, copy_bar);
+    install_simple_action(app, "preferences", {
+        let app = app.clone();
+        move || preferences_ui::show_preferences(&app)
+    });
     install_simple_action(app, "about", || {
         let about = gtk::AboutDialog::builder()
             .program_name("Cyber-Pumpkin")
@@ -221,6 +328,13 @@ fn install_view_actions(
         "sort-size",
         pane_action(left, right, active, |pane| {
             pane.set_sort_mode(SortMode::Size);
+        }),
+    );
+    install_simple_action(
+        app,
+        "sort-date",
+        pane_action(left, right, active, |pane| {
+            pane.set_sort_mode(SortMode::Date);
         }),
     );
 
@@ -334,6 +448,7 @@ where
 fn install_accelerators(app: &adw::Application) {
     app.set_accels_for_action("app.refresh", &["<Primary>r"]);
     app.set_accels_for_action("app.connect-sftp", &["<Primary>k"]);
+    app.set_accels_for_action("app.preferences", &["<Primary>comma"]);
     app.set_accels_for_action("app.new-folder", &["<Primary><Shift>n"]);
     app.set_accels_for_action("app.rename", &["F2"]);
     app.set_accels_for_action("app.delete", &["Delete"]);
@@ -380,31 +495,31 @@ fn build_toolbar(
     active: &Rc<Cell<PaneSide>>,
     activity: &gtk::Revealer,
 ) -> gtk::Box {
-    let toolbar = gtk::Box::new(Orientation::Horizontal, 6);
-    toolbar.set_margin_top(6);
-    toolbar.set_margin_bottom(2);
+    let toolbar = gtk::Box::new(Orientation::Horizontal, 4);
+    toolbar.add_css_class("compact-toolbar");
+    toolbar.set_margin_bottom(3);
     toolbar.set_margin_start(8);
     toolbar.set_margin_end(8);
 
-    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh.set_tooltip_text(Some("Refresh active pane"));
-    let connect = gtk::Button::with_label("Connect");
-    connect.set_tooltip_text(Some("Connect active pane to SFTP"));
-    let local = gtk::Button::with_label("Local");
-    local.set_tooltip_text(Some("Disconnect active pane back to the local filesystem"));
-    let new_folder = gtk::Button::with_label("New Folder");
-    let info = gtk::Button::with_label("Info");
-    let rename = gtk::Button::with_label("Rename");
-    let delete = gtk::Button::with_label("Delete");
-    let hidden = gtk::ToggleButton::with_label("Hidden");
-    let activity_button = gtk::ToggleButton::with_label("Activity");
+    let refresh = icon_button("view-refresh-symbolic", "Refresh");
+    let new_folder = icon_button("folder-new-symbolic", "New Folder");
+    let info = icon_button("dialog-information-symbolic", "Inspector / Get Info");
+    let rename = icon_button("edit-symbolic", "Rename");
+    let delete = icon_button("user-trash-symbolic", "Delete");
+
+    let hidden = gtk::ToggleButton::new();
+    hidden.set_icon_name("view-hidden-symbolic");
+    hidden.set_tooltip_text(Some("Show Hidden Files"));
+    let activity_button = gtk::ToggleButton::new();
+    activity_button.set_icon_name("view-reveal-symbolic");
+    activity_button.set_tooltip_text(Some("Show Activity"));
     let sort = create_sort_combo();
-    let reverse = gtk::ToggleButton::with_label("Reverse");
+    let reverse = gtk::ToggleButton::new();
+    reverse.set_icon_name("view-sort-descending-symbolic");
+    reverse.set_tooltip_text(Some("Reverse Sort Order"));
 
     for widget in [
         refresh.upcast_ref::<gtk::Widget>(),
-        connect.upcast_ref::<gtk::Widget>(),
-        local.upcast_ref::<gtk::Widget>(),
         new_folder.upcast_ref::<gtk::Widget>(),
         info.upcast_ref::<gtk::Widget>(),
         rename.upcast_ref::<gtk::Widget>(),
@@ -419,8 +534,6 @@ fn build_toolbar(
 
     connect_toolbar_actions(
         &refresh,
-        &connect,
-        &local,
         &new_folder,
         &info,
         &rename,
@@ -438,11 +551,15 @@ fn build_toolbar(
     toolbar
 }
 
+fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.set_tooltip_text(Some(tooltip));
+    button
+}
+
 #[allow(clippy::too_many_arguments)]
 fn connect_toolbar_actions(
     refresh: &gtk::Button,
-    connect: &gtk::Button,
-    local: &gtk::Button,
     new_folder: &gtk::Button,
     info: &gtk::Button,
     rename: &gtk::Button,
@@ -457,8 +574,6 @@ fn connect_toolbar_actions(
     activity: &gtk::Revealer,
 ) {
     connect_refresh(refresh, left, right, active);
-    connect_button_to_pane(connect, left, right, active, show_sftp_dialog);
-    connect_button_to_pane(local, left, right, active, disconnect_to_local);
     connect_new_folder(new_folder, left, right, active);
     connect_info(info, left, right, active);
     connect_rename(rename, left, right, active);
@@ -474,6 +589,7 @@ fn create_sort_combo() -> gtk::ComboBoxText {
     combo.append_text("Name");
     combo.append_text("Type");
     combo.append_text("Size");
+    combo.append_text("Date");
     combo.set_active(Some(0));
     combo.set_tooltip_text(Some("Sort active pane"));
     combo
@@ -571,6 +687,7 @@ fn connect_sort(
         let mode = match combo.active() {
             Some(1) => SortMode::Type,
             Some(2) => SortMode::Size,
+            Some(3) => SortMode::Date,
             _ => SortMode::Name,
         };
         active_pane(&left, &right, active.get()).set_sort_mode(mode);
@@ -755,47 +872,6 @@ fn show_delete_dialog(pane: &PaneHandle) {
         dialog.close();
     });
     dialog.present();
-}
-
-fn build_pumpkin_patch(
-    home: &str,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) -> gtk::Box {
-    let sidebar = gtk::Box::new(Orientation::Vertical, 4);
-    sidebar.set_margin_top(8);
-    sidebar.set_margin_bottom(8);
-    sidebar.set_margin_start(8);
-    sidebar.set_margin_end(8);
-
-    let title = gtk::Label::new(Some("Pumpkin Patch"));
-    title.set_xalign(0.0);
-    title.add_css_class("heading");
-    sidebar.append(&title);
-
-    let home_path = Path::new(home);
-    let places = [
-        ("Home", home_path.to_path_buf()),
-        ("Desktop", home_path.join("Desktop")),
-        ("Documents", home_path.join("Documents")),
-        ("Downloads", home_path.join("Downloads")),
-        ("Root", Path::new("/").to_path_buf()),
-    ];
-
-    for (label, path) in places {
-        let button = gtk::Button::with_label(label);
-        button.set_halign(gtk::Align::Fill);
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        let text = path.to_string_lossy().into_owned();
-        button.connect_clicked(move |_| {
-            active_pane(&left, &right, active.get()).navigate_text(&text);
-        });
-        sidebar.append(&button);
-    }
-    sidebar
 }
 
 fn active_pane<'a>(left: &'a PaneHandle, right: &'a PaneHandle, side: PaneSide) -> &'a PaneHandle {
