@@ -3,8 +3,8 @@
 mod browser;
 mod connection;
 mod inspector;
+mod pane_workspace;
 mod preferences_ui;
-mod pumpkin_patch;
 mod server_workspace;
 mod shell;
 mod transfer_ui;

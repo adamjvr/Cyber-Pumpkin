@@ -1,8 +1,7 @@
-use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane, format_size};
+use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane};
 use crate::inspector::InspectorPane;
+use crate::pane_workspace::{PaneMode, PaneWorkspace};
 use crate::preferences_ui;
-use crate::pumpkin_patch::PumpkinPatch;
-use crate::server_workspace;
 use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
 use gtk::Orientation;
@@ -12,6 +11,42 @@ use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
 
+#[derive(Clone)]
+struct SyncPanel {
+    root: gtk::Box,
+    left_path: gtk::Label,
+    right_path: gtk::Label,
+    plan: gtk::Label,
+}
+
+impl SyncPanel {
+    fn refresh(&self, left: &PaneHandle, right: &PaneHandle) {
+        self.left_path.set_text(left.location().as_str());
+        self.right_path.set_text(right.location().as_str());
+        self.plan.set_text(
+            "Sync preview will use the shared sync planner. No filesystem changes are made from this screen yet.",
+        );
+    }
+}
+
+#[derive(Clone)]
+struct ActionContext {
+    home: String,
+    left: PaneHandle,
+    right: PaneHandle,
+    left_workspace: PaneWorkspace,
+    right_workspace: PaneWorkspace,
+    active: Rc<Cell<PaneSide>>,
+    inspector: gtk::Box,
+    inspector_button: gtk::ToggleButton,
+    activity_popover: gtk::Popover,
+    main_stack: gtk::Stack,
+    sync_panel: SyncPanel,
+    title: gtk::Label,
+    copy_bar: CopyBar,
+}
+
+#[allow(clippy::too_many_lines)]
 pub(crate) fn build_ui(app: &adw::Application) {
     install_css();
 
@@ -20,81 +55,161 @@ pub(crate) fn build_ui(app: &adw::Application) {
     let left = build_pane("Local", &home, PaneSide::Left, &active);
     let right = build_pane("Local", &home, PaneSide::Right, &active);
 
-    let activity_list = create_activity_list();
-    let activity_revealer = create_activity_revealer(&activity_list);
-    let copy_bar = build_copy_bar(&left, &right, &activity_list);
-    let inspector = InspectorPane::new();
+    let title = gtk::Label::new(Some("Cyber-Pumpkin"));
+    title.add_css_class("heading");
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Search active pane"));
+    search.set_width_chars(24);
 
+    let mode_observer: Rc<dyn Fn(PaneSide, PaneMode)> = {
+        let title = title.clone();
+        let search = search.clone();
+        let active = Rc::clone(&active);
+        let left = left.clone();
+        let right = right.clone();
+        Rc::new(move |side, mode| {
+            if active.get() != side {
+                return;
+            }
+            let pane = match side {
+                PaneSide::Left => &left,
+                PaneSide::Right => &right,
+            };
+            apply_mode_chrome(&title, &search, pane, mode);
+        })
+    };
+
+    let left_workspace = PaneWorkspace::new(
+        &home,
+        left.clone(),
+        PaneSide::Left,
+        &active,
+        Rc::clone(&mode_observer),
+    );
+    let right_workspace = PaneWorkspace::new(
+        &home,
+        right.clone(),
+        PaneSide::Right,
+        &active,
+        Rc::clone(&mode_observer),
+    );
+
+    let inspector = InspectorPane::new();
     {
         let inspector = inspector.clone();
         let active = Rc::clone(&active);
+        let title = title.clone();
+        let search = search.clone();
+        let workspace = left_workspace.clone();
+        let pane = left.clone();
         left.set_selection_observer(move |entry, backend| {
             if active.get() == PaneSide::Left {
                 inspector.update(entry, &backend);
+                apply_mode_chrome(&title, &search, &pane, workspace.mode());
             }
         });
     }
     {
         let inspector = inspector.clone();
         let active = Rc::clone(&active);
+        let title = title.clone();
+        let search = search.clone();
+        let workspace = right_workspace.clone();
+        let pane = right.clone();
         right.set_selection_observer(move |entry, backend| {
             if active.get() == PaneSide::Right {
                 inspector.update(entry, &backend);
+                apply_mode_chrome(&title, &search, &pane, workspace.mode());
             }
         });
     }
 
-    let right_stack = gtk::Stack::new();
-    right_stack.set_hexpand(true);
-    right_stack.set_vexpand(true);
-    right_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    right_stack.add_titled(&right.root, Some("browser"), "Browser");
-    let servers = server_workspace::build_servers_panel(&right, &right_stack);
-    right_stack.add_titled(&servers, Some("servers"), "Servers");
-    let quick_connect = server_workspace::build_quick_connect_panel(&right, &right_stack);
-    right_stack.add_titled(&quick_connect, Some("quick-connect"), "Quick Connect");
+    let activity_list = create_activity_list();
+    let activity_popover = create_activity_popover(&activity_list);
+    let copy_bar = build_copy_bar(&left, &right, &activity_list);
 
-    let panes = build_panes(&left, &right_stack);
-    let browser = gtk::Box::new(Orientation::Vertical, 0);
-    browser.append(&build_mode_bar(&right_stack, &left, &right, &active));
-    browser.append(&build_toolbar(&left, &right, &active, &activity_revealer));
-    browser.append(&copy_bar.root);
-    browser.append(&panes);
-    browser.append(&activity_revealer);
+    let panes = build_panes(&left_workspace.root, &right_workspace.root);
+    let browser_page = gtk::Box::new(Orientation::Vertical, 0);
+    browser_page.append(&panes);
+    browser_page.append(&copy_bar.root);
+
+    let main_stack = gtk::Stack::new();
+    main_stack.set_hexpand(true);
+    main_stack.set_vexpand(true);
+    main_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    main_stack.add_named(&browser_page, Some("browser"));
+
+    let sync_panel = build_sync_panel(&main_stack, &title);
+    main_stack.add_named(&sync_panel.root, Some("sync"));
 
     let browser_with_inspector = gtk::Paned::new(Orientation::Horizontal);
-    browser_with_inspector.set_position(1010);
+    browser_with_inspector.set_position(1220);
     browser_with_inspector.set_wide_handle(false);
-    browser_with_inspector.set_start_child(Some(&browser));
+    browser_with_inspector.set_start_child(Some(&main_stack));
     browser_with_inspector.set_end_child(Some(&inspector.root));
 
-    let pumpkin_patch = PumpkinPatch::new(&home, &left, &right, &active);
-    let body = gtk::Paned::new(Orientation::Horizontal);
-    body.set_position(220);
-    body.set_wide_handle(false);
-    body.set_start_child(Some(&pumpkin_patch.root));
-    body.set_end_child(Some(&browser_with_inspector));
-
     let header = adw::HeaderBar::new();
-    let title = gtk::Label::new(Some("Cyber-Pumpkin"));
-    title.add_css_class("heading");
     header.set_title_widget(Some(&title));
-    header.pack_end(&build_menu_button());
 
-    install_actions(
-        app,
-        &home,
-        &left,
-        &right,
-        &active,
-        &activity_revealer,
-        &copy_bar,
-    );
+    let sync_button = icon_button("emblem-synchronizing-symbolic", "Sync Files");
+    let activity_button = gtk::MenuButton::builder()
+        .icon_name("view-reveal-symbolic")
+        .tooltip_text("Activity")
+        .build();
+    activity_button.set_popover(Some(&activity_popover));
+    let inspector_button = gtk::ToggleButton::new();
+    inspector_button.set_icon_name("dialog-information-symbolic");
+    inspector_button.set_tooltip_text(Some("Inspector"));
+    inspector_button.set_active(true);
+
+    header.pack_end(&build_menu_button());
+    header.pack_end(&search);
+    header.pack_end(&inspector_button);
+    header.pack_end(&activity_button);
+    header.pack_end(&sync_button);
+
+    let context = ActionContext {
+        home: home.clone(),
+        left: left.clone(),
+        right: right.clone(),
+        left_workspace: left_workspace.clone(),
+        right_workspace: right_workspace.clone(),
+        active: Rc::clone(&active),
+        inspector: inspector.root.clone(),
+        inspector_button: inspector_button.clone(),
+        activity_popover: activity_popover.clone(),
+        main_stack: main_stack.clone(),
+        sync_panel: sync_panel.clone(),
+        title: title.clone(),
+        copy_bar: copy_bar.clone(),
+    };
+
+    install_actions(app, &context);
     install_accelerators(app);
+
+    {
+        let context = context.clone();
+        sync_button.connect_clicked(move |_| show_sync(&context));
+    }
+    {
+        let inspector_root = inspector.root.clone();
+        inspector_button.connect_toggled(move |button| {
+            inspector_root.set_visible(button.is_active());
+        });
+    }
+    {
+        let left_workspace = left_workspace.clone();
+        let right_workspace = right_workspace.clone();
+        let active = Rc::clone(&active);
+        search.connect_search_changed(move |entry| match active.get() {
+            PaneSide::Left => left_workspace.set_search_query(entry.text().as_str()),
+            PaneSide::Right => right_workspace.set_search_query(entry.text().as_str()),
+        });
+    }
 
     let root = gtk::Box::new(Orientation::Vertical, 0);
     root.append(&header);
-    root.append(&body);
+    root.append(&browser_with_inspector);
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -106,51 +221,192 @@ pub(crate) fn build_ui(app: &adw::Application) {
     window.present();
 }
 
-fn build_panes(left: &PaneHandle, right: &gtk::Stack) -> gtk::Paned {
+fn build_panes(left: &gtk::Box, right: &gtk::Box) -> gtk::Paned {
     let panes = gtk::Paned::new(Orientation::Horizontal);
     panes.set_hexpand(true);
     panes.set_vexpand(true);
     panes.set_position(610);
     panes.set_wide_handle(false);
-    panes.set_start_child(Some(&left.root));
+    panes.set_start_child(Some(left));
     panes.set_end_child(Some(right));
     panes
 }
 
-fn build_mode_bar(
-    right_stack: &gtk::Stack,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) -> gtk::Box {
-    let bar = gtk::Box::new(Orientation::Horizontal, 8);
-    bar.set_margin_top(4);
-    bar.set_margin_bottom(4);
-    bar.set_margin_start(8);
-    bar.set_margin_end(8);
+#[allow(clippy::too_many_lines)]
+fn build_sync_panel(main_stack: &gtk::Stack, title: &gtk::Label) -> SyncPanel {
+    let root = gtk::Box::new(Orientation::Vertical, 18);
+    root.set_margin_top(22);
+    root.set_margin_bottom(22);
+    root.set_margin_start(70);
+    root.set_margin_end(70);
 
-    let switcher = gtk::StackSwitcher::new();
-    switcher.set_stack(Some(right_stack));
-    switcher.set_halign(gtk::Align::Start);
-    bar.append(&switcher);
+    let heading = gtk::Label::new(Some("Sync Files"));
+    heading.add_css_class("title-1");
+    root.append(&heading);
 
-    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    bar.append(&spacer);
+    let endpoints = gtk::Box::new(Orientation::Horizontal, 24);
+    endpoints.set_halign(gtk::Align::Center);
+    let left_path = sync_endpoint("Left Pane");
+    let arrows = gtk::Label::new(Some("←   →"));
+    arrows.add_css_class("title-1");
+    arrows.add_css_class("dim-label");
+    let right_path = sync_endpoint("Right Pane");
+    endpoints.append(&left_path.0);
+    endpoints.append(&arrows);
+    endpoints.append(&right_path.0);
+    root.append(&endpoints);
+    root.append(&gtk::Separator::new(Orientation::Horizontal));
 
-    let search = gtk::SearchEntry::new();
-    search.set_placeholder_text(Some("Search active pane"));
-    search.set_width_chars(24);
+    let options = gtk::Box::new(Orientation::Vertical, 8);
+    options.set_halign(gtk::Align::Center);
+    options.append(&gtk::CheckButton::with_label(
+        "Delete orphaned destination files",
+    ));
+    options.append(&gtk::CheckButton::with_label("Follow symbolic links"));
+    options.append(&gtk::CheckButton::with_label(
+        "Skip items matching rules list",
+    ));
+    root.append(&options);
+
+    let plan = gtk::Label::new(Some(
+        "Sync preview will use the shared sync planner. No filesystem changes are made from this screen yet.",
+    ));
+    plan.set_wrap(true);
+    plan.set_xalign(0.0);
+    plan.add_css_class("dim-label");
+    root.append(&plan);
+
+    let actions = gtk::Box::new(Orientation::Horizontal, 8);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let simulate = gtk::Button::with_label("Simulate");
+    let synchronize = gtk::Button::with_label("Synchronize");
+    synchronize.add_css_class("suggested-action");
+    synchronize.set_sensitive(false);
+    synchronize.set_tooltip_text(Some("Sync execution engine is not wired yet"));
+    actions.append(&cancel);
+    actions.append(&simulate);
+    actions.append(&synchronize);
+    root.append(&actions);
+
     {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        search.connect_search_changed(move |entry| {
-            active_pane(&left, &right, active.get()).set_filter_query(entry.text().as_str());
+        let main_stack = main_stack.clone();
+        let title = title.clone();
+        cancel.connect_clicked(move |_| {
+            main_stack.set_visible_child_name("browser");
+            title.set_text("Cyber-Pumpkin");
         });
     }
-    bar.append(&search);
-    bar
+    {
+        let plan = plan.clone();
+        simulate.connect_clicked(move |_| {
+            plan.set_text(
+                "Simulation is intentionally disabled until cp-sync-plan can produce a deterministic preview.",
+            );
+        });
+    }
+
+    SyncPanel {
+        root,
+        left_path: left_path.1,
+        right_path: right_path.1,
+        plan,
+    }
+}
+
+fn sync_endpoint(title: &str) -> (gtk::Box, gtk::Label) {
+    let root = gtk::Box::new(Orientation::Vertical, 6);
+    root.set_width_request(330);
+    let icon = gtk::Image::from_icon_name("folder-symbolic");
+    icon.set_pixel_size(64);
+    icon.set_halign(gtk::Align::Center);
+    let title = gtk::Label::new(Some(title));
+    title.add_css_class("heading");
+    title.set_halign(gtk::Align::Center);
+    let path = gtk::Label::new(Some("—"));
+    path.set_halign(gtk::Align::Center);
+    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    path.add_css_class("dim-label");
+    root.append(&icon);
+    root.append(&title);
+    root.append(&path);
+    (root, path)
+}
+
+fn show_sync(context: &ActionContext) {
+    context.sync_panel.refresh(&context.left, &context.right);
+    context.main_stack.set_visible_child_name("sync");
+    context.title.set_text("Sync Files");
+}
+
+fn create_activity_list() -> gtk::ListBox {
+    let list = gtk::ListBox::new();
+    list.set_selection_mode(gtk::SelectionMode::None);
+    let label = gtk::Label::new(Some("No transfer activity yet."));
+    label.set_xalign(0.0);
+    label.add_css_class("dim-label");
+    let row = gtk::ListBoxRow::new();
+    row.set_selectable(false);
+    row.set_child(Some(&label));
+    list.append(&row);
+    list
+}
+
+fn create_activity_popover(list: &gtk::ListBox) -> gtk::Popover {
+    let title = gtk::Label::new(Some("Activity"));
+    title.set_xalign(0.0);
+    title.add_css_class("heading");
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_width(430);
+    scroll.set_min_content_height(230);
+    scroll.set_child(Some(list));
+
+    let content = gtk::Box::new(Orientation::Vertical, 8);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    content.append(&title);
+    content.append(&scroll);
+
+    let popover = gtk::Popover::new();
+    popover.set_child(Some(&content));
+    popover
+}
+
+fn apply_mode_chrome(
+    title: &gtk::Label,
+    search: &gtk::SearchEntry,
+    pane: &PaneHandle,
+    mode: PaneMode,
+) {
+    match mode {
+        PaneMode::Browser => {
+            title.set_text(&browser_title(pane));
+            search.set_placeholder_text(Some("Search active pane"));
+        }
+        PaneMode::PumpkinPatch => {
+            title.set_text("Pumpkin Patch");
+            search.set_placeholder_text(Some("Search Pumpkin Patch"));
+        }
+        PaneMode::QuickConnect => {
+            title.set_text("Quick Connect");
+            search.set_placeholder_text(Some("Quick Connect"));
+        }
+    }
+}
+
+fn browser_title(pane: &PaneHandle) -> String {
+    let location = pane.location();
+    Path::new(location.as_str())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || pane.connection_display_name(),
+            std::borrow::ToOwned::to_owned,
+        )
 }
 
 fn install_css() {
@@ -160,7 +416,7 @@ fn install_css() {
          .navigation-sidebar row > * { padding-top: 1px; padding-bottom: 1px; }\n\
          .boxed-list { border-radius: 8px; }\n\
          entry.flat { min-height: 26px; }\n\
-         .compact-toolbar button { min-height: 28px; min-width: 30px; padding: 2px 6px; }",
+         .pane-location-strip button { min-height: 24px; padding: 1px 6px; }",
     );
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -175,10 +431,9 @@ fn build_menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
 
     let file = gio::Menu::new();
-    file.append(Some("Connect SFTP…"), Some("app.connect-sftp"));
+    file.append(Some("Quick Connect…"), Some("app.connect-sftp"));
     file.append(Some("Disconnect to Local"), Some("app.disconnect-local"));
     file.append(Some("New Folder…"), Some("app.new-folder"));
-    file.append(Some("Get Info"), Some("app.info"));
     file.append(Some("Rename…"), Some("app.rename"));
     file.append(Some("Delete…"), Some("app.delete"));
     file.append(Some("Preferences…"), Some("app.preferences"));
@@ -186,8 +441,10 @@ fn build_menu_button() -> gtk::MenuButton {
 
     let view = gio::Menu::new();
     view.append(Some("Refresh"), Some("app.refresh"));
+    view.append(Some("Inspector"), Some("app.info"));
+    view.append(Some("Activity"), Some("app.activity"));
+    view.append(Some("Sync Files"), Some("app.sync"));
     view.append(Some("Show Hidden Files"), Some("app.hidden"));
-    view.append(Some("Show Activity"), Some("app.activity"));
     let sort = gio::Menu::new();
     sort.append(Some("Name"), Some("app.sort-name"));
     sort.append(Some("Type"), Some("app.sort-type"));
@@ -200,6 +457,7 @@ fn build_menu_button() -> gtk::MenuButton {
     let go = gio::Menu::new();
     go.append(Some("Home"), Some("app.go-home"));
     go.append(Some("Downloads"), Some("app.go-downloads"));
+    go.append(Some("Desktop"), Some("app.go-desktop"));
     go.append(Some("Root"), Some("app.go-root"));
     menu.append_submenu(Some("Go"), &go);
 
@@ -218,19 +476,12 @@ fn build_menu_button() -> gtk::MenuButton {
         .build()
 }
 
-fn install_actions(
-    app: &adw::Application,
-    home: &str,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    activity: &gtk::Revealer,
-    copy_bar: &CopyBar,
-) {
-    install_file_actions(app, left, right, active);
-    install_view_actions(app, left, right, active, activity);
-    install_go_actions(app, home, left, right, active);
-    install_transfer_action(app, left, right, active, copy_bar);
+fn install_actions(app: &adw::Application, context: &ActionContext) {
+    install_file_actions(app, context);
+    install_view_actions(app, context);
+    install_go_actions(app, context);
+    install_transfer_action(app, context);
+
     install_simple_action(app, "preferences", {
         let app = app.clone();
         move || preferences_ui::show_preferences(&app)
@@ -245,178 +496,127 @@ fn install_actions(
     });
 }
 
-fn install_file_actions(
-    app: &adw::Application,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    install_simple_action(
-        app,
-        "connect-sftp",
-        pane_action(left, right, active, show_sftp_dialog),
-    );
-    install_simple_action(
-        app,
-        "disconnect-local",
-        pane_action(left, right, active, disconnect_to_local),
-    );
-    install_simple_action(
-        app,
-        "refresh",
-        pane_action(left, right, active, PaneHandle::refresh),
-    );
-    install_simple_action(
-        app,
-        "new-folder",
-        pane_action(left, right, active, show_new_folder_dialog),
-    );
-    install_simple_action(
-        app,
-        "rename",
-        pane_action(left, right, active, show_rename_dialog),
-    );
-    install_simple_action(
-        app,
-        "delete",
-        pane_action(left, right, active, show_delete_dialog),
-    );
-    install_simple_action(
-        app,
-        "info",
-        pane_action(left, right, active, show_info_dialog),
-    );
+fn install_file_actions(app: &adw::Application, context: &ActionContext) {
+    install_simple_action(app, "connect-sftp", {
+        let context = context.clone();
+        move || active_workspace(&context).show_quick_connect()
+    });
+    install_simple_action(app, "disconnect-local", {
+        let context = context.clone();
+        move || {
+            let home = context.home.clone();
+            active_workspace(&context).open_local(&home);
+        }
+    });
+    install_simple_action(app, "refresh", {
+        let context = context.clone();
+        move || active_pane(&context).refresh()
+    });
+    install_simple_action(app, "new-folder", {
+        let context = context.clone();
+        move || show_new_folder_dialog(active_pane(&context))
+    });
+    install_simple_action(app, "rename", {
+        let context = context.clone();
+        move || show_rename_dialog(active_pane(&context))
+    });
+    install_simple_action(app, "delete", {
+        let context = context.clone();
+        move || show_delete_dialog(active_pane(&context))
+    });
 }
 
-fn install_view_actions(
-    app: &adw::Application,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    activity: &gtk::Revealer,
-) {
+fn install_view_actions(app: &adw::Application, context: &ActionContext) {
+    install_simple_action(app, "info", {
+        let context = context.clone();
+        move || {
+            let next = !context.inspector.is_visible();
+            context.inspector.set_visible(next);
+            context.inspector_button.set_active(next);
+        }
+    });
+    install_simple_action(app, "activity", {
+        let popover = context.activity_popover.clone();
+        move || popover.popup()
+    });
+    install_simple_action(app, "sync", {
+        let context = context.clone();
+        move || show_sync(&context)
+    });
+
     install_toggle_action(app, "hidden", false, {
-        let left = left.clone();
-        let right = right.clone();
+        let left = context.left.clone();
+        let right = context.right.clone();
         move |show| {
             left.set_show_hidden(show);
             right.set_show_hidden(show);
         }
     });
 
-    install_toggle_action(app, "activity", false, {
-        let activity = activity.clone();
-        move |show| activity.set_reveal_child(show)
-    });
-
-    install_simple_action(
-        app,
-        "sort-name",
-        pane_action(left, right, active, |pane| {
-            pane.set_sort_mode(SortMode::Name);
-        }),
-    );
-    install_simple_action(
-        app,
-        "sort-type",
-        pane_action(left, right, active, |pane| {
-            pane.set_sort_mode(SortMode::Type);
-        }),
-    );
-    install_simple_action(
-        app,
-        "sort-size",
-        pane_action(left, right, active, |pane| {
-            pane.set_sort_mode(SortMode::Size);
-        }),
-    );
-    install_simple_action(
-        app,
-        "sort-date",
-        pane_action(left, right, active, |pane| {
-            pane.set_sort_mode(SortMode::Date);
-        }),
-    );
+    install_sort_action(app, "sort-name", context, SortMode::Name);
+    install_sort_action(app, "sort-type", context, SortMode::Type);
+    install_sort_action(app, "sort-size", context, SortMode::Size);
+    install_sort_action(app, "sort-date", context, SortMode::Date);
 
     let reverse = Rc::new(Cell::new(false));
     install_simple_action(app, "sort-reverse", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
+        let context = context.clone();
         let reverse = Rc::clone(&reverse);
         move || {
             let next = !reverse.get();
             reverse.set(next);
-            active_pane(&left, &right, active.get()).set_sort_descending(next);
+            active_pane(&context).set_sort_descending(next);
         }
     });
 }
 
-fn install_go_actions(
+fn install_sort_action(
     app: &adw::Application,
-    home: &str,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
+    name: &str,
+    context: &ActionContext,
+    mode: SortMode,
 ) {
-    let home_path = home.to_owned();
+    let context = context.clone();
+    install_simple_action(app, name, move || active_pane(&context).set_sort_mode(mode));
+}
+
+fn install_go_actions(app: &adw::Application, context: &ActionContext) {
+    let home = context.home.clone();
     install_simple_action(app, "go-home", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || active_pane(&left, &right, active.get()).navigate_text(&home_path)
+        let context = context.clone();
+        move || active_workspace(&context).open_local(&home)
     });
 
-    let downloads = Path::new(home)
+    let downloads = Path::new(&context.home)
         .join("Downloads")
         .to_string_lossy()
         .into_owned();
     install_simple_action(app, "go-downloads", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || active_pane(&left, &right, active.get()).navigate_text(&downloads)
+        let context = context.clone();
+        move || active_workspace(&context).open_local(&downloads)
+    });
+
+    let desktop = Path::new(&context.home)
+        .join("Desktop")
+        .to_string_lossy()
+        .into_owned();
+    install_simple_action(app, "go-desktop", {
+        let context = context.clone();
+        move || active_workspace(&context).open_local(&desktop)
     });
 
     install_simple_action(app, "go-root", {
-        let left = left.clone();
-        let right = right.clone();
-        let active = Rc::clone(active);
-        move || active_pane(&left, &right, active.get()).navigate_text("/")
+        let context = context.clone();
+        move || active_workspace(&context).open_local("/")
     });
 }
 
-fn install_transfer_action(
-    app: &adw::Application,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    copy_bar: &CopyBar,
-) {
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    let copy_bar = copy_bar.clone();
-
-    install_simple_action(app, "copy-other", move || match active.get() {
-        PaneSide::Left => copy_bar.copy_between(&left, &right),
-        PaneSide::Right => copy_bar.copy_between(&right, &left),
+fn install_transfer_action(app: &adw::Application, context: &ActionContext) {
+    let context = context.clone();
+    install_simple_action(app, "copy-other", move || match context.active.get() {
+        PaneSide::Left => context.copy_bar.copy_between(&context.left, &context.right),
+        PaneSide::Right => context.copy_bar.copy_between(&context.right, &context.left),
     });
-}
-
-fn pane_action<F>(
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    handler: F,
-) -> impl Fn() + 'static
-where
-    F: Fn(&PaneHandle) + 'static,
-{
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    move || handler(active_pane(&left, &right, active.get()))
 }
 
 fn install_simple_action<F>(app: &adw::Application, name: &str, handler: F)
@@ -457,320 +657,6 @@ fn install_accelerators(app: &adw::Application) {
     app.set_accels_for_action("app.hidden", &["<Primary>period"]);
 }
 
-fn create_activity_list() -> gtk::ListBox {
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::None);
-    let label = gtk::Label::new(Some("No transfer activity yet."));
-    label.set_xalign(0.0);
-    label.add_css_class("dim-label");
-    let row = gtk::ListBoxRow::new();
-    row.set_selectable(false);
-    row.set_child(Some(&label));
-    list.append(&row);
-    list
-}
-
-fn create_activity_revealer(list: &gtk::ListBox) -> gtk::Revealer {
-    let title = gtk::Label::new(Some("Activity"));
-    title.set_xalign(0.0);
-    title.add_css_class("heading");
-
-    let content = gtk::Box::new(Orientation::Vertical, 4);
-    content.set_margin_top(8);
-    content.set_margin_bottom(8);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
-    content.append(&title);
-    content.append(list);
-
-    let revealer = gtk::Revealer::new();
-    revealer.set_transition_type(gtk::RevealerTransitionType::SlideUp);
-    revealer.set_child(Some(&content));
-    revealer
-}
-
-fn build_toolbar(
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    activity: &gtk::Revealer,
-) -> gtk::Box {
-    let toolbar = gtk::Box::new(Orientation::Horizontal, 4);
-    toolbar.add_css_class("compact-toolbar");
-    toolbar.set_margin_bottom(3);
-    toolbar.set_margin_start(8);
-    toolbar.set_margin_end(8);
-
-    let refresh = icon_button("view-refresh-symbolic", "Refresh");
-    let new_folder = icon_button("folder-new-symbolic", "New Folder");
-    let info = icon_button("dialog-information-symbolic", "Inspector / Get Info");
-    let rename = icon_button("edit-symbolic", "Rename");
-    let delete = icon_button("user-trash-symbolic", "Delete");
-
-    let hidden = gtk::ToggleButton::new();
-    hidden.set_icon_name("view-hidden-symbolic");
-    hidden.set_tooltip_text(Some("Show Hidden Files"));
-    let activity_button = gtk::ToggleButton::new();
-    activity_button.set_icon_name("view-reveal-symbolic");
-    activity_button.set_tooltip_text(Some("Show Activity"));
-    let sort = create_sort_combo();
-    let reverse = gtk::ToggleButton::new();
-    reverse.set_icon_name("view-sort-descending-symbolic");
-    reverse.set_tooltip_text(Some("Reverse Sort Order"));
-
-    for widget in [
-        refresh.upcast_ref::<gtk::Widget>(),
-        new_folder.upcast_ref::<gtk::Widget>(),
-        info.upcast_ref::<gtk::Widget>(),
-        rename.upcast_ref::<gtk::Widget>(),
-        delete.upcast_ref::<gtk::Widget>(),
-        hidden.upcast_ref::<gtk::Widget>(),
-        activity_button.upcast_ref::<gtk::Widget>(),
-        sort.upcast_ref::<gtk::Widget>(),
-        reverse.upcast_ref::<gtk::Widget>(),
-    ] {
-        toolbar.append(widget);
-    }
-
-    connect_toolbar_actions(
-        &refresh,
-        &new_folder,
-        &info,
-        &rename,
-        &delete,
-        &hidden,
-        &activity_button,
-        &sort,
-        &reverse,
-        left,
-        right,
-        active,
-        activity,
-    );
-
-    toolbar
-}
-
-fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::from_icon_name(icon);
-    button.set_tooltip_text(Some(tooltip));
-    button
-}
-
-#[allow(clippy::too_many_arguments)]
-fn connect_toolbar_actions(
-    refresh: &gtk::Button,
-    new_folder: &gtk::Button,
-    info: &gtk::Button,
-    rename: &gtk::Button,
-    delete: &gtk::Button,
-    hidden: &gtk::ToggleButton,
-    activity_button: &gtk::ToggleButton,
-    sort: &gtk::ComboBoxText,
-    reverse: &gtk::ToggleButton,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    activity: &gtk::Revealer,
-) {
-    connect_refresh(refresh, left, right, active);
-    connect_new_folder(new_folder, left, right, active);
-    connect_info(info, left, right, active);
-    connect_rename(rename, left, right, active);
-    connect_delete(delete, left, right, active);
-    connect_hidden(hidden, left, right);
-    connect_activity(activity_button, activity);
-    connect_sort(sort, left, right, active);
-    connect_reverse(reverse, left, right, active);
-}
-
-fn create_sort_combo() -> gtk::ComboBoxText {
-    let combo = gtk::ComboBoxText::new();
-    combo.append_text("Name");
-    combo.append_text("Type");
-    combo.append_text("Size");
-    combo.append_text("Date");
-    combo.set_active(Some(0));
-    combo.set_tooltip_text(Some("Sort active pane"));
-    combo
-}
-
-fn connect_refresh(
-    button: &gtk::Button,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    connect_button_to_pane(button, left, right, active, PaneHandle::refresh);
-}
-
-fn connect_new_folder(
-    button: &gtk::Button,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    connect_button_to_pane(button, left, right, active, show_new_folder_dialog);
-}
-
-fn connect_info(
-    button: &gtk::Button,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    connect_button_to_pane(button, left, right, active, show_info_dialog);
-}
-
-fn connect_rename(
-    button: &gtk::Button,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    connect_button_to_pane(button, left, right, active, show_rename_dialog);
-}
-
-fn connect_delete(
-    button: &gtk::Button,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    connect_button_to_pane(button, left, right, active, show_delete_dialog);
-}
-
-fn connect_button_to_pane<F>(
-    button: &gtk::Button,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-    handler: F,
-) where
-    F: Fn(&PaneHandle) + 'static,
-{
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    button.clone().connect_clicked(move |_| {
-        handler(active_pane(&left, &right, active.get()));
-    });
-}
-
-fn connect_hidden(button: &gtk::ToggleButton, left: &PaneHandle, right: &PaneHandle) {
-    let left = left.clone();
-    let right = right.clone();
-    button.clone().connect_toggled(move |toggle| {
-        let show = toggle.is_active();
-        left.set_show_hidden(show);
-        right.set_show_hidden(show);
-    });
-}
-
-fn connect_activity(button: &gtk::ToggleButton, activity: &gtk::Revealer) {
-    let activity = activity.clone();
-    button.clone().connect_toggled(move |toggle| {
-        activity.set_reveal_child(toggle.is_active());
-    });
-}
-
-fn connect_sort(
-    combo: &gtk::ComboBoxText,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    combo.clone().connect_changed(move |combo| {
-        let mode = match combo.active() {
-            Some(1) => SortMode::Type,
-            Some(2) => SortMode::Size,
-            Some(3) => SortMode::Date,
-            _ => SortMode::Name,
-        };
-        active_pane(&left, &right, active.get()).set_sort_mode(mode);
-    });
-}
-
-fn connect_reverse(
-    button: &gtk::ToggleButton,
-    left: &PaneHandle,
-    right: &PaneHandle,
-    active: &Rc<Cell<PaneSide>>,
-) {
-    let left = left.clone();
-    let right = right.clone();
-    let active = Rc::clone(active);
-    button.clone().connect_toggled(move |toggle| {
-        active_pane(&left, &right, active.get()).set_sort_descending(toggle.is_active());
-    });
-}
-
-fn show_sftp_dialog(pane: &PaneHandle) {
-    let dialog = gtk::Dialog::builder()
-        .title("Connect SFTP")
-        .modal(true)
-        .build();
-    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-    dialog.add_button("Connect", gtk::ResponseType::Accept);
-
-    let fields = gtk::Box::new(Orientation::Vertical, 6);
-    fields.set_margin_top(12);
-    fields.set_margin_bottom(12);
-    fields.set_margin_start(12);
-    fields.set_margin_end(12);
-
-    let host = gtk::Entry::new();
-    host.set_placeholder_text(Some("Host"));
-    let username = gtk::Entry::new();
-    username.set_placeholder_text(Some("Username"));
-    let port = gtk::Entry::new();
-    port.set_placeholder_text(Some("Port"));
-    port.set_text("22");
-    let path = gtk::Entry::new();
-    path.set_placeholder_text(Some("Remote path"));
-    path.set_text("/");
-
-    for field in [&host, &username, &port, &path] {
-        fields.append(field);
-    }
-    dialog.content_area().append(&fields);
-
-    let pane = pane.clone();
-    dialog.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept {
-            let port_number = port.text().parse::<u16>().unwrap_or(22);
-            if let Err(error) = pane.connect_sftp(
-                host.text().as_str(),
-                username.text().as_str(),
-                port_number,
-                path.text().as_str(),
-            ) {
-                let error_dialog = gtk::MessageDialog::builder()
-                    .modal(true)
-                    .message_type(gtk::MessageType::Error)
-                    .buttons(gtk::ButtonsType::Close)
-                    .text("SFTP connection failed")
-                    .secondary_text(&error)
-                    .build();
-                error_dialog.connect_response(|dialog, _| dialog.close());
-                error_dialog.present();
-            }
-        }
-        dialog.close();
-    });
-    dialog.present();
-}
-
-fn disconnect_to_local(pane: &PaneHandle) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_owned());
-    if let Err(error) = pane.disconnect_to_local(&home) {
-        eprintln!("failed to return pane to local filesystem: {error}");
-    }
-}
-
 fn show_new_folder_dialog(pane: &PaneHandle) {
     show_text_dialog("New Folder", "Folder name", None, {
         let pane = pane.clone();
@@ -786,35 +672,6 @@ fn show_rename_dialog(pane: &PaneHandle) {
         let pane = pane.clone();
         move |text| pane.rename_selected(text)
     });
-}
-
-fn show_info_dialog(pane: &PaneHandle) {
-    let Some(entry) = pane.selected_entry() else {
-        return;
-    };
-
-    let kind = format!("{:?}", entry.kind);
-    let message = format!(
-        "Name: {}\nType: {kind}\nSize: {}\nPath: {}",
-        entry.name,
-        format_size(entry.size),
-        entry.path.as_str()
-    );
-
-    let dialog = gtk::Dialog::builder().title("Get Info").modal(true).build();
-    dialog.add_button("Close", gtk::ResponseType::Close);
-
-    let label = gtk::Label::new(Some(&message));
-    label.set_selectable(true);
-    label.set_xalign(0.0);
-    label.set_margin_top(16);
-    label.set_margin_bottom(16);
-    label.set_margin_start(16);
-    label.set_margin_end(16);
-    dialog.content_area().append(&label);
-
-    dialog.connect_response(|dialog, _| dialog.close());
-    dialog.present();
 }
 
 fn show_text_dialog<F>(title: &str, placeholder: &str, initial: Option<&str>, handler: F)
@@ -874,9 +731,22 @@ fn show_delete_dialog(pane: &PaneHandle) {
     dialog.present();
 }
 
-fn active_pane<'a>(left: &'a PaneHandle, right: &'a PaneHandle, side: PaneSide) -> &'a PaneHandle {
-    match side {
-        PaneSide::Left => left,
-        PaneSide::Right => right,
+fn active_pane(context: &ActionContext) -> &PaneHandle {
+    match context.active.get() {
+        PaneSide::Left => &context.left,
+        PaneSide::Right => &context.right,
     }
+}
+
+fn active_workspace(context: &ActionContext) -> &PaneWorkspace {
+    match context.active.get() {
+        PaneSide::Left => &context.left_workspace,
+        PaneSide::Right => &context.right_workspace,
+    }
+}
+
+fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.set_tooltip_text(Some(tooltip));
+    button
 }

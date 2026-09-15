@@ -50,16 +50,18 @@ pub(crate) fn build_copy_bar(
     status.set_hexpand(true);
     status.add_css_class("dim-label");
 
+    copy_left.set_visible(false);
+    copy_right.set_visible(false);
+
     let root = gtk::Box::new(Orientation::Horizontal, 8);
-    root.set_margin_top(6);
-    root.set_margin_bottom(6);
+    root.set_margin_top(5);
+    root.set_margin_bottom(5);
     root.set_margin_start(8);
     root.set_margin_end(8);
-    root.append(&copy_left);
-    root.append(&copy_right);
-    root.append(&cancel);
+    root.set_visible(false);
     root.append(&progress);
     root.append(&status);
+    root.append(&cancel);
 
     let bar = CopyBar {
         root,
@@ -188,6 +190,7 @@ fn start_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
 }
 
 fn begin_transfer_ui(bar: &CopyBar, item_name: &str, cancellation: &CancellationToken) {
+    bar.root.set_visible(true);
     *bar.active_cancel.borrow_mut() = Some(cancellation.clone());
     bar.copy_left.set_sensitive(false);
     bar.copy_right.set_sensitive(false);
