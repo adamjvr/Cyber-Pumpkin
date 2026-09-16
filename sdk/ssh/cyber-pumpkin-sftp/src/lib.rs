@@ -1,220 +1,106 @@
-//! SFTP backend built on libssh2 with strict host-key verification.
-//!
-//! The first milestone intentionally supports SSH-agent and private-key
-//! authentication only. Passwords are not accepted on the command line.
+//! SFTP filesystem backend built on Cyber-Pumpkin's shared SSH layer.
 
 use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind, ReadStream, WriteStream};
 use cyber_pumpkin_core::{
     BackendCapabilities, BackendId, BackendPath, CapabilitySupport, EntryKind, FileEntry,
 };
-use ssh2::{CheckResult, ErrorCode, FileStat, KnownHostFileKind, Session, Sftp};
-use std::env;
-use std::io;
-use std::net::TcpStream;
+pub use cyber_pumpkin_ssh::{PrivateKeyAuth, SshAuth as SftpAuth};
+use cyber_pumpkin_ssh::{SshConfig, SshConnection, SshError, SshErrorKind};
+use ssh2::{ErrorCode, FileStat, Sftp};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const DEFAULT_PORT: u16 = 22;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_TIMEOUT_MS: u32 = 30_000;
-
-/// Non-secret SFTP connection configuration.
+/// Non-secret SFTP configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SftpConfig {
     id: BackendId,
-    host: String,
-    port: u16,
-    username: String,
-    known_hosts_file: PathBuf,
+    ssh: SshConfig,
 }
 
 impl SftpConfig {
-    /// Creates configuration using port 22 and `~/.ssh/known_hosts`.
+    /// Creates SFTP configuration using shared SSH defaults.
     ///
     /// # Errors
     ///
-    /// Returns [`BackendError`] when the host or username is blank, or when
-    /// the home directory cannot be resolved.
+    /// Returns [`BackendError`] when configuration is invalid.
     pub fn new(
         id: BackendId,
         host: impl Into<String>,
         username: impl Into<String>,
     ) -> Result<Self, BackendError> {
-        let host = host.into();
-        let username = username.into();
-        if host.trim().is_empty() {
-            return Err(BackendError::new(
-                ErrorKind::InvalidInput,
-                "configure SFTP",
-                None,
-                "host must not be blank",
-            ));
-        }
-        if username.trim().is_empty() {
-            return Err(BackendError::new(
-                ErrorKind::InvalidInput,
-                "configure SFTP",
-                None,
-                "username must not be blank",
-            ));
-        }
-
-        let home = env::var_os("HOME").ok_or_else(|| {
-            BackendError::new(
-                ErrorKind::InvalidInput,
-                "resolve known_hosts",
-                None,
-                "HOME is not set",
-            )
-        })?;
-
-        Ok(Self {
-            id,
-            host,
-            port: DEFAULT_PORT,
-            username,
-            known_hosts_file: PathBuf::from(home).join(".ssh/known_hosts"),
-        })
+        let ssh = SshConfig::new(host, username).map_err(|error| map_ssh_error(&error))?;
+        Ok(Self { id, ssh })
     }
 
-    /// Overrides the TCP port.
+    /// Overrides SSH port.
     #[must_use]
-    pub const fn with_port(mut self, port: u16) -> Self {
-        self.port = port;
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.ssh = self.ssh.with_port(port);
         self
     }
 
-    /// Overrides the OpenSSH known-hosts file.
+    /// Overrides known-hosts path.
     #[must_use]
     pub fn with_known_hosts_file(mut self, path: impl Into<PathBuf>) -> Self {
-        self.known_hosts_file = path.into();
+        self.ssh = self.ssh.with_known_hosts_file(path);
         self
     }
 
-    /// Returns the configured backend identifier.
+    /// Overrides timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.ssh = self.ssh.with_timeout(timeout);
+        self
+    }
+
+    /// Backend id.
     #[must_use]
     pub const fn id(&self) -> &BackendId {
         &self.id
     }
 
-    /// Returns the remote hostname.
+    /// Host.
     #[must_use]
     pub fn host(&self) -> &str {
-        &self.host
+        self.ssh.host()
     }
 
-    /// Returns the remote TCP port.
+    /// Port.
     #[must_use]
     pub const fn port(&self) -> u16 {
-        self.port
+        self.ssh.port()
     }
 
-    /// Returns the SSH username.
+    /// Username.
     #[must_use]
     pub fn username(&self) -> &str {
-        &self.username
+        self.ssh.username()
     }
 
-    /// Returns the known-hosts file used for strict verification.
+    /// Known-hosts file.
     #[must_use]
     pub fn known_hosts_file(&self) -> &Path {
-        &self.known_hosts_file
+        self.ssh.known_hosts_file()
     }
 }
 
-/// Private-key authentication material supplied by a trusted caller.
-///
-/// The optional passphrase is intentionally not exposed through the Phase 1A
-/// command-line interface.
-pub struct PrivateKeyAuth {
-    private_key: PathBuf,
-    public_key: Option<PathBuf>,
-    passphrase: Option<String>,
-}
-
-impl PrivateKeyAuth {
-    /// Creates private-key authentication without a passphrase.
-    #[must_use]
-    pub fn new(private_key: impl Into<PathBuf>) -> Self {
-        Self {
-            private_key: private_key.into(),
-            public_key: None,
-            passphrase: None,
-        }
-    }
-
-    /// Supplies an explicit public-key path.
-    #[must_use]
-    pub fn with_public_key(mut self, public_key: impl Into<PathBuf>) -> Self {
-        self.public_key = Some(public_key.into());
-        self
-    }
-
-    /// Supplies a passphrase obtained through a trusted secret path.
-    #[must_use]
-    pub fn with_passphrase(mut self, passphrase: impl Into<String>) -> Self {
-        self.passphrase = Some(passphrase.into());
-        self
-    }
-}
-
-/// Authentication method used after host identity has been verified.
-pub enum SftpAuth {
-    /// Authenticate through the user's SSH agent.
-    Agent,
-    /// Authenticate using a private key stored on disk.
-    PrivateKey(Box<PrivateKeyAuth>),
-}
-
-/// Connected SFTP filesystem backend.
+/// Connected SFTP backend.
 pub struct SftpBackend {
     id: BackendId,
+    _ssh: SshConnection,
     sftp: Sftp,
 }
 
 impl SftpBackend {
-    /// Connects, verifies the server host key, authenticates, and opens SFTP.
+    /// Connects through shared SSH and opens SFTP.
     ///
     /// # Errors
     ///
-    /// Returns [`BackendError`] for TCP, SSH handshake, host-key,
-    /// authentication, or SFTP-subsystem failures. Unknown and mismatched host
-    /// keys are rejected; this function never performs trust-on-first-use.
+    /// Returns [`BackendError`] for SSH or SFTP failures.
     pub fn connect(config: &SftpConfig, auth: &SftpAuth) -> Result<Self, BackendError> {
-        let tcp = TcpStream::connect((config.host(), config.port()))
-            .map_err(|error| Self::io_error(ErrorKind::Transport, "connect TCP", None, &error))?;
-        tcp.set_read_timeout(Some(DEFAULT_TIMEOUT))
-            .map_err(|error| {
-                Self::io_error(ErrorKind::Transport, "set TCP read timeout", None, &error)
-            })?;
-        tcp.set_write_timeout(Some(DEFAULT_TIMEOUT))
-            .map_err(|error| {
-                Self::io_error(ErrorKind::Transport, "set TCP write timeout", None, &error)
-            })?;
-
-        let mut session = Session::new().map_err(|error| {
-            BackendError::new(
-                ErrorKind::Protocol,
-                "create SSH session",
-                None,
-                error.to_string(),
-            )
-        })?;
-        session.set_tcp_stream(tcp);
-        session.set_timeout(DEFAULT_TIMEOUT_MS);
-        session.handshake().map_err(|error| {
-            BackendError::new(
-                ErrorKind::Protocol,
-                "SSH handshake",
-                None,
-                error.to_string(),
-            )
-        })?;
-
-        Self::verify_host_key(&session, config)?;
-        Self::authenticate(&session, config, auth)?;
-
-        let sftp = session.sftp().map_err(|error| {
+        let ssh =
+            SshConnection::connect(&config.ssh, auth).map_err(|error| map_ssh_error(&error))?;
+        let sftp = ssh.session().sftp().map_err(|error| {
             BackendError::new(
                 ErrorKind::Protocol,
                 "open SFTP subsystem",
@@ -222,99 +108,11 @@ impl SftpBackend {
                 error.to_string(),
             )
         })?;
-
         Ok(Self {
             id: config.id().clone(),
+            _ssh: ssh,
             sftp,
         })
-    }
-
-    fn verify_host_key(session: &Session, config: &SftpConfig) -> Result<(), BackendError> {
-        let (host_key, _) = session.host_key().ok_or_else(|| {
-            BackendError::new(
-                ErrorKind::HostKey,
-                "read SSH host key",
-                None,
-                "server did not provide a host key",
-            )
-        })?;
-
-        let mut known_hosts = session.known_hosts().map_err(|error| {
-            BackendError::new(
-                ErrorKind::HostKey,
-                "initialize known_hosts",
-                None,
-                error.to_string(),
-            )
-        })?;
-        known_hosts
-            .read_file(config.known_hosts_file(), KnownHostFileKind::OpenSSH)
-            .map_err(|error| {
-                BackendError::new(
-                    ErrorKind::HostKey,
-                    "read known_hosts",
-                    None,
-                    format!("{}: {error}", config.known_hosts_file().display()),
-                )
-            })?;
-
-        match known_hosts.check_port(config.host(), config.port(), host_key) {
-            CheckResult::Match => Ok(()),
-            CheckResult::Mismatch => Err(BackendError::new(
-                ErrorKind::HostKey,
-                "verify SSH host key",
-                None,
-                "host key does not match known_hosts",
-            )),
-            CheckResult::NotFound => Err(BackendError::new(
-                ErrorKind::HostKey,
-                "verify SSH host key",
-                None,
-                "host is not present in known_hosts",
-            )),
-            CheckResult::Failure => Err(BackendError::new(
-                ErrorKind::HostKey,
-                "verify SSH host key",
-                None,
-                "known_hosts verification failed",
-            )),
-        }
-    }
-
-    fn authenticate(
-        session: &Session,
-        config: &SftpConfig,
-        auth: &SftpAuth,
-    ) -> Result<(), BackendError> {
-        let result = match auth {
-            SftpAuth::Agent => session.userauth_agent(config.username()),
-            SftpAuth::PrivateKey(key) => session.userauth_pubkey_file(
-                config.username(),
-                key.public_key.as_deref(),
-                key.private_key.as_path(),
-                key.passphrase.as_deref(),
-            ),
-        };
-
-        result.map_err(|error| {
-            BackendError::new(
-                ErrorKind::Authentication,
-                "SSH authentication",
-                None,
-                error.to_string(),
-            )
-        })?;
-
-        if session.authenticated() {
-            Ok(())
-        } else {
-            Err(BackendError::new(
-                ErrorKind::Authentication,
-                "SSH authentication",
-                None,
-                "server did not accept authentication",
-            ))
-        }
     }
 
     fn path(path: &BackendPath) -> &Path {
@@ -380,15 +178,6 @@ impl SftpBackend {
             _ => ErrorKind::Protocol,
         };
         BackendError::new(kind, operation, Some(path.clone()), error.to_string())
-    }
-
-    fn io_error(
-        kind: ErrorKind,
-        operation: &'static str,
-        path: Option<BackendPath>,
-        error: &io::Error,
-    ) -> BackendError {
-        BackendError::new(kind, operation, path, error.to_string())
     }
 }
 
@@ -469,6 +258,17 @@ impl Backend for SftpBackend {
                 .map_err(|error| Self::ssh_error("remove SFTP file", path, &error))
         }
     }
+}
+
+fn map_ssh_error(error: &SshError) -> BackendError {
+    let kind = match error.kind() {
+        SshErrorKind::InvalidInput => ErrorKind::InvalidInput,
+        SshErrorKind::Transport => ErrorKind::Transport,
+        SshErrorKind::Protocol => ErrorKind::Protocol,
+        SshErrorKind::HostKey => ErrorKind::HostKey,
+        SshErrorKind::Authentication => ErrorKind::Authentication,
+    };
+    BackendError::new(kind, error.operation(), None, error.message())
 }
 
 #[cfg(test)]

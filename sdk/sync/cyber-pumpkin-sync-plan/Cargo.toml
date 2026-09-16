@@ -1,15 +1,19 @@
 [package]
-name = "cyber-pumpkin-sftp"
+name = "cyber-pumpkin-sync-plan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
-cyber-pumpkin-ssh = { path = "../cyber-pumpkin-ssh" }
-ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
+cyber-pumpkin-rules = { path = "../../rules/cyber-pumpkin-rules" }
+
+[dev-dependencies]
+cyber-pumpkin-local = { path = "../../filesystem/cyber-pumpkin-local" }
 
 [lints]
 workspace = true

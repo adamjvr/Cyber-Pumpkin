@@ -118,12 +118,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "cyber-pumpkin-operations"
+version = "0.1.0"
+
+[[package]]
+name = "cyber-pumpkin-rules"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-core",
+]
+
+[[package]]
 name = "cyber-pumpkin-sftp"
 version = "0.1.0"
 dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
+ "cyber-pumpkin-ssh",
  "ssh2",
+]
+
+[[package]]
+name = "cyber-pumpkin-ssh"
+version = "0.1.0"
+dependencies = [
+ "ssh2",
+]
+
+[[package]]
+name = "cyber-pumpkin-sync-plan"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-local",
+ "cyber-pumpkin-rules",
 ]
 
 [[package]]
