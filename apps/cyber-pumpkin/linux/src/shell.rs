@@ -2,6 +2,7 @@ use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane};
 use crate::inspector::InspectorPane;
 use crate::pane_workspace::{PaneMode, PaneWorkspace};
 use crate::preferences_ui;
+use crate::sync_ui::SyncPanel;
 use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
 use gtk::Orientation;
@@ -10,24 +11,6 @@ use gtk::glib::variant::ToVariant;
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
-
-#[derive(Clone)]
-struct SyncPanel {
-    root: gtk::Box,
-    left_path: gtk::Label,
-    right_path: gtk::Label,
-    plan: gtk::Label,
-}
-
-impl SyncPanel {
-    fn refresh(&self, left: &PaneHandle, right: &PaneHandle) {
-        self.left_path.set_text(left.location().as_str());
-        self.right_path.set_text(right.location().as_str());
-        self.plan.set_text(
-            "Sync preview will use the shared sync planner. No filesystem changes are made from this screen yet.",
-        );
-    }
-}
 
 #[derive(Clone)]
 struct ActionContext {
@@ -139,7 +122,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
     main_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     main_stack.add_named(&browser_page, Some("browser"));
 
-    let sync_panel = build_sync_panel(&main_stack, &title);
+    let sync_panel = SyncPanel::new(&left, &right, &main_stack, &title, &activity_list);
     main_stack.add_named(&sync_panel.root, Some("sync"));
 
     let browser_with_inspector = gtk::Paned::new(Orientation::Horizontal);
@@ -234,109 +217,8 @@ fn build_panes(left: &gtk::Box, right: &gtk::Box) -> gtk::Paned {
     panes
 }
 
-#[allow(clippy::too_many_lines)]
-fn build_sync_panel(main_stack: &gtk::Stack, title: &gtk::Label) -> SyncPanel {
-    let root = gtk::Box::new(Orientation::Vertical, 18);
-    root.set_margin_top(22);
-    root.set_margin_bottom(22);
-    root.set_margin_start(70);
-    root.set_margin_end(70);
-
-    let heading = gtk::Label::new(Some("Sync Files"));
-    heading.add_css_class("title-1");
-    root.append(&heading);
-
-    let endpoints = gtk::Box::new(Orientation::Horizontal, 24);
-    endpoints.set_halign(gtk::Align::Center);
-    let left_path = sync_endpoint("Left Pane");
-    let arrows = gtk::Label::new(Some("←   →"));
-    arrows.add_css_class("title-1");
-    arrows.add_css_class("dim-label");
-    let right_path = sync_endpoint("Right Pane");
-    endpoints.append(&left_path.0);
-    endpoints.append(&arrows);
-    endpoints.append(&right_path.0);
-    root.append(&endpoints);
-    root.append(&gtk::Separator::new(Orientation::Horizontal));
-
-    let options = gtk::Box::new(Orientation::Vertical, 8);
-    options.set_halign(gtk::Align::Center);
-    options.append(&gtk::CheckButton::with_label(
-        "Delete orphaned destination files",
-    ));
-    options.append(&gtk::CheckButton::with_label("Follow symbolic links"));
-    options.append(&gtk::CheckButton::with_label(
-        "Skip items matching rules list",
-    ));
-    root.append(&options);
-
-    let plan = gtk::Label::new(Some(
-        "Sync preview will use the shared sync planner. No filesystem changes are made from this screen yet.",
-    ));
-    plan.set_wrap(true);
-    plan.set_xalign(0.0);
-    plan.add_css_class("dim-label");
-    root.append(&plan);
-
-    let actions = gtk::Box::new(Orientation::Horizontal, 8);
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let simulate = gtk::Button::with_label("Simulate");
-    let synchronize = gtk::Button::with_label("Synchronize");
-    synchronize.add_css_class("suggested-action");
-    synchronize.set_sensitive(false);
-    synchronize.set_tooltip_text(Some("Sync execution engine is not wired yet"));
-    actions.append(&cancel);
-    actions.append(&simulate);
-    actions.append(&synchronize);
-    root.append(&actions);
-
-    {
-        let main_stack = main_stack.clone();
-        let title = title.clone();
-        cancel.connect_clicked(move |_| {
-            main_stack.set_visible_child_name("browser");
-            title.set_text("Cyber-Pumpkin");
-        });
-    }
-    {
-        let plan = plan.clone();
-        simulate.connect_clicked(move |_| {
-            plan.set_text(
-                "Simulation is intentionally disabled until cp-sync-plan can produce a deterministic preview.",
-            );
-        });
-    }
-
-    SyncPanel {
-        root,
-        left_path: left_path.1,
-        right_path: right_path.1,
-        plan,
-    }
-}
-
-fn sync_endpoint(title: &str) -> (gtk::Box, gtk::Label) {
-    let root = gtk::Box::new(Orientation::Vertical, 6);
-    root.set_width_request(330);
-    let icon = gtk::Image::from_icon_name("folder-symbolic");
-    icon.set_pixel_size(64);
-    icon.set_halign(gtk::Align::Center);
-    let title = gtk::Label::new(Some(title));
-    title.add_css_class("heading");
-    title.set_halign(gtk::Align::Center);
-    let path = gtk::Label::new(Some("—"));
-    path.set_halign(gtk::Align::Center);
-    path.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    path.add_css_class("dim-label");
-    root.append(&icon);
-    root.append(&title);
-    root.append(&path);
-    (root, path)
-}
-
 fn show_sync(context: &ActionContext) {
-    context.sync_panel.refresh(&context.left, &context.right);
+    context.sync_panel.refresh();
     context.main_stack.set_visible_child_name("sync");
     context.title.set_text("Sync Files");
 }

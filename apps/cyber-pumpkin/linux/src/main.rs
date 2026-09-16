@@ -7,6 +7,7 @@ mod pane_workspace;
 mod preferences_ui;
 mod server_workspace;
 mod shell;
+mod sync_ui;
 mod transfer_ui;
 
 use adw::prelude::*;

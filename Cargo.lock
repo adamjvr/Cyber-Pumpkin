@@ -72,6 +72,8 @@ dependencies = [
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
  "cyber-pumpkin-sftp",
+ "cyber-pumpkin-sync",
+ "cyber-pumpkin-sync-plan",
  "cyber-pumpkin-transfer",
 ]
 
@@ -103,7 +105,10 @@ dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
+ "cyber-pumpkin-operations",
  "cyber-pumpkin-sftp",
+ "cyber-pumpkin-sync",
+ "cyber-pumpkin-sync-plan",
  "cyber-pumpkin-transfer",
  "gtk4",
  "libadwaita",
@@ -143,6 +148,17 @@ name = "cyber-pumpkin-ssh"
 version = "0.1.0"
 dependencies = [
  "ssh2",
+]
+
+[[package]]
+name = "cyber-pumpkin-sync"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-local",
+ "cyber-pumpkin-sync-plan",
+ "cyber-pumpkin-transfer",
 ]
 
 [[package]]

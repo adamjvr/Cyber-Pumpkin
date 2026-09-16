@@ -13,6 +13,7 @@ Cyber-Pumpkin deliberately keeps reusable behavior in internal libraries.
 | `cyber-pumpkin-operations` | generalized operation lifecycle and dependencies |
 | `cyber-pumpkin-rules` | reusable include/skip rules |
 | `cyber-pumpkin-sync-plan` | deterministic backend-neutral sync planning |
+| `cyber-pumpkin-sync` | execution of immutable sync plans through backend/transfer primitives |
 | `cyber-pumpkin-application` | pane/session/profile/preferences state |
 
 ## Dependency direction
@@ -38,7 +39,6 @@ Rust libraries own behavior.
 
 ## Next libraries
 
-- `cyber-pumpkin-sync` for executing immutable plans through operations
 - `cyber-pumpkin-history`
 - `cyber-pumpkin-secrets` with Keychain / Secret Service adapters
 - `cyber-pumpkin-platform` for notifications, clipboard, dialogs, filesystem watch, trash, terminal, and updates

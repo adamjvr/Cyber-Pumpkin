@@ -14,6 +14,9 @@ cyber-pumpkin-backend = { version = "0.1.0", path = "../../../sdk/filesystem/cyb
 cyber-pumpkin-core = { version = "0.1.0", path = "../../../sdk/foundation/cyber-pumpkin-core" }
 cyber-pumpkin-local = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-local" }
 cyber-pumpkin-sftp = { version = "0.1.0", path = "../../../sdk/ssh/cyber-pumpkin-sftp" }
+cyber-pumpkin-operations = { version = "0.1.0", path = "../../../sdk/operations/cyber-pumpkin-operations" }
+cyber-pumpkin-sync-plan = { version = "0.1.0", path = "../../../sdk/sync/cyber-pumpkin-sync-plan" }
+cyber-pumpkin-sync = { version = "0.1.0", path = "../../../sdk/sync/cyber-pumpkin-sync" }
 cyber-pumpkin-transfer = { version = "0.1.0", path = "../../../sdk/transfer/cyber-pumpkin-transfer" }
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_6"] }
 

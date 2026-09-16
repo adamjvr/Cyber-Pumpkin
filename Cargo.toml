@@ -9,6 +9,7 @@ members = [
   "sdk/operations/cyber-pumpkin-operations",
   "sdk/rules/cyber-pumpkin-rules",
   "sdk/sync/cyber-pumpkin-sync-plan",
+  "sdk/sync/cyber-pumpkin-sync",
   "sdk/transfer/cyber-pumpkin-transfer",
   "tools/cpk",
   "apps/cyber-pumpkin/linux",

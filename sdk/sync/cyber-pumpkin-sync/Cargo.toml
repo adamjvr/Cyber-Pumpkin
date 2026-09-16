@@ -1,0 +1,20 @@
+[package]
+name = "cyber-pumpkin-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
+cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
+cyber-pumpkin-sync-plan = { path = "../cyber-pumpkin-sync-plan" }
+cyber-pumpkin-transfer = { path = "../../transfer/cyber-pumpkin-transfer" }
+
+[dev-dependencies]
+cyber-pumpkin-local = { path = "../../filesystem/cyber-pumpkin-local" }
+
+[lints]
+workspace = true

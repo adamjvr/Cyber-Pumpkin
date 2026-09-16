@@ -5,6 +5,8 @@ use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, FileEntry};
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_sftp::{SftpAuth, SftpBackend, SftpConfig};
+use cyber_pumpkin_sync::{SyncExecutionOutcome, execute_plan};
+use cyber_pumpkin_sync_plan::{SyncOptions, plan_one_way};
 use cyber_pumpkin_transfer::{
     CancellationToken, DestinationPolicy, Endpoint, TransferId, TransferJob, TransferSpec,
     TreeTransferOutcome, execute_file, execute_file_with_policy, execute_tree_controlled,
@@ -24,6 +26,8 @@ USAGE:
   cpk local-mkdir <path>
   cpk local-rename <source> <destination>
   cpk local-rm <path>
+  cpk sync-plan-local <source-dir> <destination-dir> [--delete-orphans]
+  cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans]
   cpk profile-list
   cpk profile-add <id> <name> <host> <username> <port> <remote-path>
   cpk profile-rm <id>
@@ -63,6 +67,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("local-mkdir") => local_mkdir_command(&mut args)?,
         Some("local-rename") => local_rename_command(&mut args)?,
         Some("local-rm") => local_remove_command(&mut args)?,
+        Some("sync-plan-local") => sync_plan_local_command(&mut args)?,
+        Some("sync-run-local") => sync_run_local_command(&mut args)?,
         Some("profile-list") => profile_list_command(&mut args)?,
         Some("profile-add") => profile_add_command(&mut args)?,
         Some("profile-rm") => profile_remove_command(&mut args)?,
@@ -137,6 +143,106 @@ fn local_remove_command(args: &mut impl Iterator<Item = String>) -> Result<(), B
     let path = next_arg(args, "path")?;
     ensure_finished(args)?;
     local_remove(&path)
+}
+
+fn sync_plan_local_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let source = next_arg(args, "source-dir")?;
+    let destination = next_arg(args, "destination-dir")?;
+    let options = sync_options(args)?;
+    let (_, _, plan) = local_sync_plan(&source, &destination, &options)?;
+    let summary = plan.summary();
+    println!(
+        "create_dirs={} copy_files={} removals={} conflicts={} skipped={}",
+        summary.directories_to_create,
+        summary.files_to_copy,
+        summary.entries_to_remove,
+        summary.conflicts,
+        summary.skipped,
+    );
+    for action in plan.actions() {
+        println!(
+            "{:?}\t{}\t{}",
+            action.kind, action.relative_path, action.reason
+        );
+    }
+    Ok(())
+}
+
+fn sync_run_local_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let source = next_arg(args, "source-dir")?;
+    let destination = next_arg(args, "destination-dir")?;
+    let options = sync_options(args)?;
+    let (source_backend, destination_backend, plan) =
+        local_sync_plan(&source, &destination, &options)?;
+    let outcome = execute_plan(
+        &plan,
+        &source_backend,
+        &destination_backend,
+        &CancellationToken::new(),
+        |_| {},
+    )?;
+    match outcome {
+        SyncExecutionOutcome::Completed(report) => println!(
+            "completed files={} directories={} removed={} skipped={} bytes={}",
+            report.files_copied,
+            report.directories_created,
+            report.entries_removed,
+            report.skipped,
+            report.bytes_copied,
+        ),
+        SyncExecutionOutcome::Cancelled(report) => println!(
+            "cancelled files={} directories={} removed={} skipped={} bytes={}",
+            report.files_copied,
+            report.directories_created,
+            report.entries_removed,
+            report.skipped,
+            report.bytes_copied,
+        ),
+    }
+    Ok(())
+}
+
+fn sync_options(args: &mut impl Iterator<Item = String>) -> Result<SyncOptions, Box<dyn Error>> {
+    let delete_orphans = match args.next().as_deref() {
+        None => false,
+        Some("--delete-orphans") => true,
+        Some(other) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unexpected sync option: {other}"),
+            )
+            .into());
+        }
+    };
+    ensure_finished(args)?;
+    Ok(SyncOptions {
+        delete_orphans,
+        ..SyncOptions::default()
+    })
+}
+
+fn local_sync_plan(
+    source: &str,
+    destination: &str,
+    options: &SyncOptions,
+) -> Result<
+    (
+        LocalBackend,
+        LocalBackend,
+        cyber_pumpkin_sync_plan::SyncPlan,
+    ),
+    Box<dyn Error>,
+> {
+    let source_backend = LocalBackend::new(BackendId::new("sync-source")?);
+    let destination_backend = LocalBackend::new(BackendId::new("sync-destination")?);
+    let plan = plan_one_way(
+        &source_backend,
+        &BackendPath::new(source)?,
+        &destination_backend,
+        &BackendPath::new(destination)?,
+        options,
+    )?;
+    Ok((source_backend, destination_backend, plan))
 }
 
 fn profile_list_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
