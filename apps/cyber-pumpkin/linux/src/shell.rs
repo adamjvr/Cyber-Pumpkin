@@ -1,3 +1,4 @@
+use crate::activity;
 use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane};
 use crate::inspector::InspectorPane;
 use crate::pane_workspace::{PaneMode, PaneWorkspace};
@@ -23,6 +24,7 @@ struct ActionContext {
     inspector: gtk::Box,
     inspector_button: gtk::ToggleButton,
     activity_popover: gtk::Popover,
+    activity_list: gtk::ListBox,
     main_stack: gtk::Stack,
     sync_panel: SyncPanel,
     title: gtk::Label,
@@ -107,7 +109,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
         });
     }
 
-    let activity_list = create_activity_list();
+    let activity_list = activity::create_activity_list();
     let activity_popover = create_activity_popover(&activity_list);
     let copy_bar = build_copy_bar(&left, &right, &activity_list);
 
@@ -161,6 +163,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
         inspector: inspector.root.clone(),
         inspector_button: inspector_button.clone(),
         activity_popover: activity_popover.clone(),
+        activity_list: activity_list.clone(),
         main_stack: main_stack.clone(),
         sync_panel: sync_panel.clone(),
         title: title.clone(),
@@ -221,19 +224,6 @@ fn show_sync(context: &ActionContext) {
     context.sync_panel.refresh();
     context.main_stack.set_visible_child_name("sync");
     context.title.set_text("Sync Files");
-}
-
-fn create_activity_list() -> gtk::ListBox {
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::None);
-    let label = gtk::Label::new(Some("No transfer activity yet."));
-    label.set_xalign(0.0);
-    label.add_css_class("dim-label");
-    let row = gtk::ListBoxRow::new();
-    row.set_selectable(false);
-    row.set_child(Some(&label));
-    list.append(&row);
-    list
 }
 
 fn create_activity_popover(list: &gtk::ListBox) -> gtk::Popover {
@@ -359,6 +349,7 @@ fn build_menu_model() -> gio::Menu {
     transfer.append(Some("Copy to Other Pane"), Some("app.copy-other"));
     transfer.append(Some("Sync Files"), Some("app.sync"));
     transfer.append(Some("Activity"), Some("app.activity"));
+    transfer.append(Some("Clear Activity"), Some("app.clear-activity"));
     menu.append_submenu(Some("Transfer"), &transfer);
 
     let window = gio::Menu::new();
@@ -451,6 +442,10 @@ fn install_view_actions(app: &adw::Application, context: &ActionContext) {
     install_simple_action(app, "activity", {
         let popover = context.activity_popover.clone();
         move || popover.popup()
+    });
+    install_simple_action(app, "clear-activity", {
+        let activity_list = context.activity_list.clone();
+        move || activity::clear(&activity_list)
     });
     install_simple_action(app, "sync", {
         let context = context.clone();

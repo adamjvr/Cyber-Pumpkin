@@ -1,5 +1,7 @@
+use crate::activity;
 use crate::browser::{PaneHandle, format_size};
 use adw::prelude::*;
+use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_operations::{OperationId, OperationKind, OperationProgress, OperationQueue};
 use cyber_pumpkin_sync::{
     SyncExecutionOutcome, SyncExecutionProgress, SyncExecutionReport, execute_plan,
@@ -546,18 +548,19 @@ impl SyncPanel {
     }
 
     fn add_activity_text(&self, id: OperationId, state: &str, detail: &str) {
-        remove_empty_activity_row(&self.activity_list);
-        let label = gtk::Label::new(Some(&format!("#{} • Sync • {state} • {detail}", id.get())));
-        label.set_xalign(0.0);
-        label.set_wrap(true);
-        label.set_margin_top(4);
-        label.set_margin_bottom(4);
-        label.set_margin_start(8);
-        label.set_margin_end(8);
-        let row = gtk::ListBoxRow::new();
-        row.set_selectable(false);
-        row.set_child(Some(&label));
-        self.activity_list.prepend(&row);
+        let history_state = match state {
+            "Completed" => HistoryState::Completed,
+            "Cancelled" => HistoryState::Cancelled,
+            _ => HistoryState::Failed,
+        };
+        activity::record(
+            &self.activity_list,
+            Some(id.get()),
+            HistoryKind::Sync,
+            history_state,
+            "Sync",
+            detail,
+        );
     }
 }
 
@@ -589,19 +592,4 @@ fn completion_text(state: &str, report: SyncExecutionReport) -> String {
         report.skipped,
         format_size(Some(report.bytes_copied)),
     )
-}
-
-fn remove_empty_activity_row(list: &gtk::ListBox) {
-    let Some(row) = list.row_at_index(0) else {
-        return;
-    };
-    let Some(child) = row.child() else {
-        return;
-    };
-    let Ok(label) = child.downcast::<gtk::Label>() else {
-        return;
-    };
-    if label.text() == "No transfer activity yet." {
-        list.remove(&row);
-    }
 }

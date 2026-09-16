@@ -1,8 +1,11 @@
 //! Cyber-Pumpkin command-line companion.
 
-use cyber_pumpkin_application::{ConnectionProfiles, SavedConnection};
+use cyber_pumpkin_application::{
+    ConnectionProfiles, SavedConnection, application_support_directory,
+};
 use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, FileEntry};
+use cyber_pumpkin_history::HistoryLog;
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_reliability::{ReliableTransferOutcome, execute_file_reliable};
 use cyber_pumpkin_sftp::{SftpAuth, SftpBackend, SftpConfig};
@@ -30,6 +33,8 @@ USAGE:
   cpk local-replace-safe <source> <destination>
   cpk sync-plan-local <source-dir> <destination-dir> [--delete-orphans]
   cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans]
+  cpk history-list
+  cpk history-clear
   cpk profile-list
   cpk profile-add <id> <name> <host> <username> <port> <remote-path>
   cpk profile-rm <id>
@@ -72,6 +77,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("local-replace-safe") => local_replace_safe_command(&mut args)?,
         Some("sync-plan-local") => sync_plan_local_command(&mut args)?,
         Some("sync-run-local") => sync_run_local_command(&mut args)?,
+        Some("history-list") => history_list_command(&mut args)?,
+        Some("history-clear") => history_clear_command(&mut args)?,
         Some("profile-list") => profile_list_command(&mut args)?,
         Some("profile-add") => profile_add_command(&mut args)?,
         Some("profile-rm") => profile_remove_command(&mut args)?,
@@ -284,6 +291,26 @@ fn local_sync_plan(
         options,
     )?;
     Ok((source_backend, destination_backend, plan))
+}
+
+fn history_list_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    ensure_finished(args)?;
+    let history = HistoryLog::load(&application_support_directory().join("history.json"))?;
+    for entry in history.entries.iter().rev() {
+        println!(
+            "{}\t{:?}\t{:?}\t{}\t{}",
+            entry.timestamp, entry.kind, entry.state, entry.label, entry.detail,
+        );
+    }
+    Ok(())
+}
+
+fn history_clear_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    ensure_finished(args)?;
+    let history = HistoryLog::default();
+    history.save(&application_support_directory().join("history.json"))?;
+    println!("activity history cleared");
+    Ok(())
 }
 
 fn profile_list_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {

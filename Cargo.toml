@@ -9,6 +9,8 @@ members = [
   "sdk/operations/cyber-pumpkin-operations",
   "sdk/operations/cyber-pumpkin-scheduler",
   "sdk/reliability/cyber-pumpkin-reliability",
+  "sdk/decisions/cyber-pumpkin-decisions",
+  "sdk/history/cyber-pumpkin-history",
   "sdk/rules/cyber-pumpkin-rules",
   "sdk/sync/cyber-pumpkin-sync-plan",
   "sdk/sync/cyber-pumpkin-sync",

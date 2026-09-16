@@ -1,5 +1,6 @@
 //! Native GTK4/libadwaita frontend for Cyber-Pumpkin on Linux.
 
+mod activity;
 mod browser;
 mod connection;
 mod inspector;

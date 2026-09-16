@@ -1,6 +1,8 @@
+use crate::activity;
 use crate::browser::{PaneHandle, format_size};
 use adw::prelude::*;
 use cyber_pumpkin_core::EntryKind;
+use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_transfer::{
     CancellationToken, Endpoint, TransferId, TransferSpec, TreeTransferOutcome,
     TreeTransferProgress, execute_tree_controlled,
@@ -338,39 +340,17 @@ fn add_activity(
     files: u64,
     bytes: Option<u64>,
 ) {
-    remove_empty_activity_row(list);
-
-    let label = gtk::Label::new(Some(&format!(
-        "#{} • Copy {item_name} • {state} • {files} files • {}",
-        transfer_id.get(),
-        format_size(bytes)
-    )));
-    label.set_xalign(0.0);
-    label.set_margin_top(4);
-    label.set_margin_bottom(4);
-    label.set_margin_start(8);
-    label.set_margin_end(8);
-
-    let row = gtk::ListBoxRow::new();
-    row.set_selectable(false);
-    row.set_child(Some(&label));
-    list.prepend(&row);
-}
-
-fn remove_empty_activity_row(list: &gtk::ListBox) {
-    let Some(row) = list.first_child() else {
-        return;
+    let history_state = match state {
+        "Completed" => HistoryState::Completed,
+        "Cancelled" => HistoryState::Cancelled,
+        _ => HistoryState::Failed,
     };
-    let Ok(row) = row.downcast::<gtk::ListBoxRow>() else {
-        return;
-    };
-    let Some(child) = row.child() else {
-        return;
-    };
-    let Ok(label) = child.downcast::<gtk::Label>() else {
-        return;
-    };
-    if label.text() == "No transfer activity yet." {
-        list.remove(&row);
-    }
+    activity::record(
+        list,
+        Some(transfer_id.get()),
+        HistoryKind::Copy,
+        history_state,
+        &format!("Copy {item_name}"),
+        &format!("{files} files • {}", format_size(bytes)),
+    );
 }
