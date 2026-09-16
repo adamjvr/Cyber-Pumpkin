@@ -16,6 +16,7 @@ members = [
   "sdk/sync/cyber-pumpkin-sync-plan",
   "sdk/sync/cyber-pumpkin-sync",
   "sdk/transfer/cyber-pumpkin-transfer",
+  "sdk/transfer/cyber-pumpkin-transfer-runtime",
   "tools/cpk",
   "apps/cyber-pumpkin/linux",
 ]

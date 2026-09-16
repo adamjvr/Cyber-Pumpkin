@@ -16,6 +16,7 @@ cyber-pumpkin-sync-plan = { path = "../../sdk/sync/cyber-pumpkin-sync-plan" }
 cyber-pumpkin-sync = { path = "../../sdk/sync/cyber-pumpkin-sync" }
 cyber-pumpkin-reliability = { path = "../../sdk/reliability/cyber-pumpkin-reliability" }
 cyber-pumpkin-transfer = { path = "../../sdk/transfer/cyber-pumpkin-transfer" }
+cyber-pumpkin-transfer-runtime = { path = "../../sdk/transfer/cyber-pumpkin-transfer-runtime" }
 
 [lints]
 workspace = true

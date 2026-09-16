@@ -15,6 +15,9 @@ use cyber_pumpkin_transfer::{
     CancellationToken, DestinationPolicy, Endpoint, TransferId, TransferJob, TransferSpec,
     TreeTransferOutcome, execute_file, execute_file_with_policy, execute_tree_controlled,
 };
+use cyber_pumpkin_transfer_runtime::{
+    CopyConflictPolicy, CopyRequest, CopyRuntimeOutcome, execute_copy as execute_runtime_copy,
+};
 use std::error::Error;
 use std::io;
 
@@ -31,6 +34,7 @@ USAGE:
   cpk local-rename <source> <destination>
   cpk local-rm <path>
   cpk local-replace-safe <source> <destination>
+  cpk copy-runtime-local <source> <destination> [--conflicts=fail|replace|skip|keep-both]
   cpk sync-plan-local <source-dir> <destination-dir> [--delete-orphans]
   cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans] [--conflicts=fail|skip|replace]
   cpk history-list
@@ -75,6 +79,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("local-rename") => local_rename_command(&mut args)?,
         Some("local-rm") => local_remove_command(&mut args)?,
         Some("local-replace-safe") => local_replace_safe_command(&mut args)?,
+        Some("copy-runtime-local") => copy_runtime_local_command(&mut args)?,
         Some("sync-plan-local") => sync_plan_local_command(&mut args)?,
         Some("sync-run-local") => sync_run_local_command(&mut args)?,
         Some("history-list") => history_list_command(&mut args)?,
@@ -189,6 +194,68 @@ fn local_replace_safe_command(
         ReliableTransferOutcome::Cancelled { bytes_copied } => {
             println!("cancelled bytes={bytes_copied}");
         }
+    }
+    Ok(())
+}
+
+fn copy_runtime_local_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let source = next_arg(args, "source")?;
+    let destination = next_arg(args, "destination")?;
+    let policy = match args.next().as_deref() {
+        None | Some("--conflicts=fail") => CopyConflictPolicy::Fail,
+        Some("--conflicts=replace") => CopyConflictPolicy::Replace,
+        Some("--conflicts=skip") => CopyConflictPolicy::Skip,
+        Some("--conflicts=keep-both") => CopyConflictPolicy::KeepBoth,
+        Some(other) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unexpected copy conflict option: {other}"),
+            )
+            .into());
+        }
+    };
+    ensure_finished(args)?;
+
+    let backend = local_backend()?;
+    let request = CopyRequest {
+        id: TransferId::new(1)?,
+        source: Endpoint {
+            backend: backend.id().clone(),
+            path: BackendPath::new(source)?,
+        },
+        destination: Endpoint {
+            backend: backend.id().clone(),
+            path: BackendPath::new(destination)?,
+        },
+        conflict_policy: policy,
+    };
+
+    match execute_runtime_copy(
+        &request,
+        &backend,
+        &backend,
+        &CancellationToken::new(),
+        |_| {},
+    )? {
+        CopyRuntimeOutcome::Completed(report) => println!(
+            "completed destination={} files={} directories={} bytes={} replaced={}",
+            report.destination.as_str(),
+            report.transfer.files_copied(),
+            report.transfer.directories_created(),
+            report.transfer.bytes_copied(),
+            report.replaced_existing,
+        ),
+        CopyRuntimeOutcome::Skipped { destination } => {
+            println!("skipped destination={}", destination.as_str());
+        }
+        CopyRuntimeOutcome::Cancelled(report) => println!(
+            "cancelled files={} directories={} bytes={}",
+            report.files_copied(),
+            report.directories_created(),
+            report.bytes_copied(),
+        ),
     }
     Ok(())
 }

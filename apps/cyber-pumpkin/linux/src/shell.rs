@@ -116,7 +116,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
     let activity_list = activity::create_activity_list();
     let decision_center = Rc::new(RefCell::new(DecisionCenter::new()));
     let activity_popover = create_activity_popover(&activity_list);
-    let copy_bar = build_copy_bar(&left, &right, &activity_list);
+    let copy_bar = build_copy_bar(&left, &right, &activity_list, Rc::clone(&decision_center));
 
     let panes = build_panes(&left_workspace.root, &right_workspace.root);
     let browser_page = gtk::Box::new(Orientation::Vertical, 0);

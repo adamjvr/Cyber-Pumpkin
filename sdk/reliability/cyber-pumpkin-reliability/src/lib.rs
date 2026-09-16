@@ -7,10 +7,11 @@
 //! to an operation-owned backup and restored if finalization fails.
 
 use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
-use cyber_pumpkin_core::{BackendPath, CapabilitySupport};
+use cyber_pumpkin_core::{BackendPath, CapabilitySupport, EntryKind};
 use cyber_pumpkin_transfer::{
-    CancellationToken, ControlledTransferOutcome, Endpoint, ExecutionError, TransferId,
-    TransferJob, TransferProgress, TransferSpec, execute_file_controlled,
+    CancellationToken, ControlledTransferOutcome, Endpoint, ExecutionError, RecursiveError,
+    TransferId, TransferJob, TransferProgress, TransferSpec, TreeTransferOutcome,
+    TreeTransferProgress, TreeTransferReport, execute_file_controlled, execute_tree_controlled,
 };
 use std::fmt;
 
@@ -60,6 +61,8 @@ pub enum ReliabilityError {
     },
     /// Payload transfer or verification failed.
     Transfer(ExecutionError),
+    /// Recursive file-or-tree transfer failed.
+    Recursive(RecursiveError),
     /// A backend operation failed outside the payload transfer.
     Backend(BackendError),
     /// Finalization failed and restoring the original destination also failed.
@@ -89,6 +92,7 @@ impl fmt::Display for ReliabilityError {
                 path.as_str()
             ),
             Self::Transfer(error) => write!(formatter, "staged transfer failed: {error}"),
+            Self::Recursive(error) => write!(formatter, "reliable tree transfer failed: {error}"),
             Self::Backend(error) => write!(formatter, "safe finalization backend failed: {error}"),
             Self::RecoveryFailed { finalize, recovery } => write!(
                 formatter,
@@ -108,6 +112,12 @@ impl std::error::Error for ReliabilityError {}
 impl From<ExecutionError> for ReliabilityError {
     fn from(value: ExecutionError) -> Self {
         Self::Transfer(value)
+    }
+}
+
+impl From<RecursiveError> for ReliabilityError {
+    fn from(value: RecursiveError) -> Self {
+        Self::Recursive(value)
     }
 }
 
@@ -197,6 +207,135 @@ where
         bytes_copied,
         replaced_existing: destination_exists,
     }))
+}
+
+/// Report produced by a reliable file-or-directory-tree copy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReliableTreeReport {
+    /// Aggregate transfer report.
+    pub transfer: TreeTransferReport,
+    /// Whether a pre-existing destination was replaced.
+    pub replaced_existing: bool,
+}
+
+/// Terminal outcome of a reliable tree transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReliableTreeOutcome {
+    /// Transfer and finalization completed.
+    Completed(ReliableTreeReport),
+    /// Cooperative cancellation was observed and any original destination was restored.
+    Cancelled(TreeTransferReport),
+}
+
+/// Executes a file or directory-tree copy while preserving an existing
+/// destination across failure and cancellation.
+///
+/// When `replace_existing` is true, the existing destination is first moved to
+/// an operation-owned sibling backup. The new tree is then created at the
+/// requested path. Failure or cancellation restores the backup; success removes
+/// the backup recursively.
+///
+/// # Errors
+///
+/// Returns [`ReliabilityError`] for backend, recursive-transfer, cleanup, or
+/// recovery failures.
+pub fn execute_tree_reliable<F>(
+    id: TransferId,
+    spec: &TransferSpec,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    cancellation: &CancellationToken,
+    replace_existing: bool,
+    on_progress: F,
+) -> Result<ReliableTreeOutcome, ReliabilityError>
+where
+    F: FnMut(TreeTransferProgress),
+{
+    let final_path = &spec.destination.path;
+    let destination_exists = match destination.stat(final_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+
+    if destination_exists && !replace_existing {
+        return Err(RecursiveError::DestinationExists(final_path.clone()).into());
+    }
+
+    if !destination_exists {
+        return execute_tree_controlled(spec, source, destination, cancellation, on_progress)
+            .map(|outcome| match outcome {
+                TreeTransferOutcome::Completed(report) => {
+                    ReliableTreeOutcome::Completed(ReliableTreeReport {
+                        transfer: report,
+                        replaced_existing: false,
+                    })
+                }
+                TreeTransferOutcome::Cancelled(report) => ReliableTreeOutcome::Cancelled(report),
+            })
+            .map_err(ReliabilityError::from);
+    }
+
+    if destination.capabilities().atomic_rename != CapabilitySupport::Supported {
+        return Err(ReliabilityError::AtomicRenameUnsupported);
+    }
+
+    let backup_path = sidecar_path(final_path, "tree-backup", id)?;
+    ensure_absent(destination, &backup_path)?;
+    destination.rename(final_path, &backup_path)?;
+
+    match execute_tree_controlled(spec, source, destination, cancellation, on_progress) {
+        Ok(TreeTransferOutcome::Completed(report)) => {
+            if let Err(error) = remove_tree_if_present(destination, &backup_path) {
+                return Err(ReliabilityError::BackupCleanupFailed {
+                    path: backup_path,
+                    message: error.to_string(),
+                });
+            }
+            Ok(ReliableTreeOutcome::Completed(ReliableTreeReport {
+                transfer: report,
+                replaced_existing: true,
+            }))
+        }
+        Ok(TreeTransferOutcome::Cancelled(report)) => {
+            restore_tree_backup(destination, final_path, &backup_path)?;
+            Ok(ReliableTreeOutcome::Cancelled(report))
+        }
+        Err(error) => {
+            let finalize = error.to_string();
+            match restore_tree_backup(destination, final_path, &backup_path) {
+                Ok(()) => Err(ReliabilityError::Recursive(error)),
+                Err(recovery) => Err(ReliabilityError::RecoveryFailed {
+                    finalize,
+                    recovery: recovery.to_string(),
+                }),
+            }
+        }
+    }
+}
+
+fn restore_tree_backup(
+    backend: &dyn Backend,
+    final_path: &BackendPath,
+    backup_path: &BackendPath,
+) -> Result<(), BackendError> {
+    remove_tree_if_present(backend, final_path)?;
+    backend.rename(backup_path, final_path)
+}
+
+fn remove_tree_if_present(backend: &dyn Backend, path: &BackendPath) -> Result<(), BackendError> {
+    let entry = match backend.stat(path) {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    if entry.kind == EntryKind::Directory {
+        for child in backend.list(path)? {
+            remove_tree_if_present(backend, &child.path)?;
+        }
+    }
+    backend.remove(path)
 }
 
 fn finalize_stage(

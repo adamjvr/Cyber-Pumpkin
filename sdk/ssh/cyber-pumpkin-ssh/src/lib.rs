@@ -10,6 +10,8 @@ use std::time::Duration;
 const DEFAULT_PORT: u16 = 22;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TIMEOUT_MS: u32 = 30_000;
+const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(60);
+const DEFAULT_MAX_REDIALS: u8 = 2;
 
 /// Stable category for SSH failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +82,8 @@ pub struct SshConfig {
     username: String,
     known_hosts_file: PathBuf,
     timeout: Duration,
+    keepalive_interval: Option<Duration>,
+    max_redials: u8,
     trusted_host_fingerprint: Option<String>,
 }
 
@@ -119,6 +123,8 @@ impl SshConfig {
             username,
             known_hosts_file: PathBuf::from(home).join(".ssh/known_hosts"),
             timeout: DEFAULT_TIMEOUT,
+            keepalive_interval: Some(DEFAULT_KEEPALIVE),
+            max_redials: DEFAULT_MAX_REDIALS,
             trusted_host_fingerprint: None,
         })
     }
@@ -141,6 +147,22 @@ impl SshConfig {
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Overrides SSH keepalive behavior.
+    ///
+    /// `None` disables protocol keepalive.
+    #[must_use]
+    pub const fn with_keepalive_interval(mut self, interval: Option<Duration>) -> Self {
+        self.keepalive_interval = interval;
+        self
+    }
+
+    /// Overrides the number of bounded redials after retryable connection failures.
+    #[must_use]
+    pub const fn with_max_redials(mut self, max_redials: u8) -> Self {
+        self.max_redials = max_redials;
         self
     }
 
@@ -180,6 +202,18 @@ impl SshConfig {
     #[must_use]
     pub const fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Returns configured keepalive interval.
+    #[must_use]
+    pub const fn keepalive_interval(&self) -> Option<Duration> {
+        self.keepalive_interval
+    }
+
+    /// Returns maximum bounded redials.
+    #[must_use]
+    pub const fn max_redials(&self) -> u8 {
+        self.max_redials
     }
 
     /// Returns the explicit application trust override.
@@ -317,6 +351,23 @@ impl SshConnection {
     /// Returns [`SshError`] on transport, protocol, trust, or auth failure.
     pub fn connect(config: &SshConfig, auth: &SshAuth) -> Result<Self, SshError> {
         validate_config(config)?;
+        let mut redials = 0_u8;
+
+        loop {
+            match Self::connect_once(config, auth) {
+                Ok(connection) => return Ok(connection),
+                Err(error) if redials < config.max_redials() && retryable_connect_error(&error) => {
+                    redials = redials.saturating_add(1);
+                    std::thread::sleep(Duration::from_millis(
+                        150_u64.saturating_mul(u64::from(redials)),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn connect_once(config: &SshConfig, auth: &SshAuth) -> Result<Self, SshError> {
         let session = handshake_session(config)?;
         verify_host_key(&session, config)?;
         authenticate(&session, config, auth)?;
@@ -363,7 +414,18 @@ fn handshake_session(config: &SshConfig) -> Result<Session, SshError> {
     session.handshake().map_err(|error| {
         SshError::new(SshErrorKind::Protocol, "SSH handshake", error.to_string())
     })?;
+    if let Some(interval) = config.keepalive_interval() {
+        let seconds = u32::try_from(interval.as_secs()).unwrap_or(u32::MAX).max(1);
+        session.set_keepalive(true, seconds);
+    }
     Ok(session)
+}
+
+const fn retryable_connect_error(error: &SshError) -> bool {
+    matches!(
+        error.kind(),
+        SshErrorKind::Transport | SshErrorKind::Protocol
+    )
 }
 
 fn load_known_hosts(
@@ -493,6 +555,8 @@ mod tests {
             .with_timeout(Duration::from_secs(45));
         assert_eq!(config.port(), 2222);
         assert_eq!(config.timeout(), Duration::from_secs(45));
+        assert_eq!(config.keepalive_interval(), Some(Duration::from_secs(60)));
+        assert_eq!(config.max_redials(), 2);
         assert_eq!(config.trusted_host_fingerprint(), None);
 
         let trusted = config.with_trusted_host_fingerprint("AA:BB");

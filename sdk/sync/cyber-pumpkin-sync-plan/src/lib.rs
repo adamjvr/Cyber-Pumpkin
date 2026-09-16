@@ -157,6 +157,7 @@ pub fn plan_one_way(
         &source_snapshot,
         &destination_snapshot,
         options.delete_orphans,
+        &options.rules,
     );
 
     let actions = combine_actions(buckets, removals);
@@ -276,14 +277,38 @@ fn plan_removals(
     source_snapshot: &BTreeMap<String, FileEntry>,
     destination_snapshot: &BTreeMap<String, FileEntry>,
     delete_orphans: bool,
+    rules: &[RuleSet],
 ) -> Vec<SyncAction> {
     if !delete_orphans {
         return Vec::new();
     }
 
+    let protected_paths = destination_snapshot
+        .iter()
+        .filter(|&(relative, destination_entry)| {
+            evaluate(
+                rules,
+                RuleTarget {
+                    name: &destination_entry.name,
+                    path: relative.as_str(),
+                    kind: destination_entry.kind,
+                },
+            ) == RuleDecision::Skip
+        })
+        .map(|(relative, _)| relative.clone())
+        .collect::<Vec<_>>();
+
     let mut removals = destination_snapshot
         .iter()
-        .filter(|(relative, _)| !source_snapshot.contains_key(*relative))
+        .filter(|(relative, _)| {
+            !source_snapshot.contains_key(*relative)
+                && !protected_paths.iter().any(|protected| {
+                    relative.as_str() == protected.as_str()
+                        || relative
+                            .strip_prefix(protected.as_str())
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+        })
         .map(|(relative, destination_entry)| {
             let kind = if destination_entry.kind == EntryKind::Directory {
                 SyncActionKind::RemoveDirectory
@@ -513,6 +538,57 @@ mod tests {
                 .iter()
                 .any(|a| a.kind == SyncActionKind::RemoveFile && a.relative_path == "orphan.txt")
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn skipped_rule_protects_destination_from_orphan_removal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use cyber_pumpkin_rules::{
+            RuleCondition, RuleDecision, RuleField, RuleMatchMode, RuleOperator, RuleSet,
+        };
+
+        let root = temp_root();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join(".git"))?;
+        fs::create_dir_all(destination.join(".git"))?;
+        fs::write(source.join(".git/config"), b"source")?;
+        fs::write(destination.join(".git/config"), b"destination")?;
+
+        let rule = RuleSet {
+            name: "Protect VCS".to_owned(),
+            enabled: true,
+            mode: RuleMatchMode::Any,
+            conditions: vec![RuleCondition {
+                field: RuleField::Name,
+                operator: RuleOperator::Is,
+                value: ".git".to_owned(),
+            }],
+            decision: RuleDecision::Skip,
+        };
+
+        let source_backend = LocalBackend::new(BackendId::new("source-rule")?);
+        let destination_backend = LocalBackend::new(BackendId::new("destination-rule")?);
+        let plan = plan_one_way(
+            &source_backend,
+            &bp(&source)?,
+            &destination_backend,
+            &bp(&destination)?,
+            &SyncOptions {
+                delete_orphans: true,
+                rules: vec![rule],
+                ..SyncOptions::default()
+            },
+        )?;
+
+        assert!(!plan.actions().iter().any(|action| {
+            matches!(
+                action.kind,
+                SyncActionKind::RemoveFile | SyncActionKind::RemoveDirectory
+            ) && action.relative_path.starts_with(".git")
+        }));
+
         fs::remove_dir_all(root)?;
         Ok(())
     }

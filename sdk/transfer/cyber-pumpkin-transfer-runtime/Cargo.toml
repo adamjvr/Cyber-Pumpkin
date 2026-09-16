@@ -1,0 +1,20 @@
+[package]
+name = "cyber-pumpkin-transfer-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
+cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
+cyber-pumpkin-reliability = { path = "../../reliability/cyber-pumpkin-reliability" }
+cyber-pumpkin-transfer = { path = "../cyber-pumpkin-transfer" }
+
+[dev-dependencies]
+cyber-pumpkin-local = { path = "../../filesystem/cyber-pumpkin-local" }
+
+[lints]
+workspace = true

@@ -49,3 +49,7 @@ Rust libraries own behavior.
 Pass 13 rule: native shells render decisions; shared decision and sync libraries own allowed choices and conflict semantics.
 
 Pass 14B rule: saved profiles contain only auth mode, paths, and secret-store references; secret values never enter profile JSON.
+
+| `cyber-pumpkin-transfer-runtime` | product copy policy, Keep Both, and reliable tree replacement |
+
+Pass 15 rule: ordinary copy, sync, and UI conflict handling converge on shared policy/reliability primitives; Linux copy admission is driven by OperationQueue + OperationScheduler.

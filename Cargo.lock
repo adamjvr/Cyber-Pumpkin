@@ -77,6 +77,7 @@ dependencies = [
  "cyber-pumpkin-sync",
  "cyber-pumpkin-sync-plan",
  "cyber-pumpkin-transfer",
+ "cyber-pumpkin-transfer-runtime",
 ]
 
 [[package]]
@@ -122,11 +123,13 @@ dependencies = [
  "cyber-pumpkin-history",
  "cyber-pumpkin-local",
  "cyber-pumpkin-operations",
+ "cyber-pumpkin-scheduler",
  "cyber-pumpkin-secrets",
  "cyber-pumpkin-sftp",
  "cyber-pumpkin-sync",
  "cyber-pumpkin-sync-plan",
  "cyber-pumpkin-transfer",
+ "cyber-pumpkin-transfer-runtime",
  "gtk4",
  "libadwaita",
 ]
@@ -217,6 +220,17 @@ dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
+]
+
+[[package]]
+name = "cyber-pumpkin-transfer-runtime"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-local",
+ "cyber-pumpkin-reliability",
+ "cyber-pumpkin-transfer",
 ]
 
 [[package]]

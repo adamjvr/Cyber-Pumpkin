@@ -55,6 +55,20 @@ impl SftpConfig {
         self
     }
 
+    /// Overrides SSH keepalive behavior.
+    #[must_use]
+    pub fn with_keepalive_interval(mut self, interval: Option<Duration>) -> Self {
+        self.ssh = self.ssh.with_keepalive_interval(interval);
+        self
+    }
+
+    /// Overrides bounded connection redials.
+    #[must_use]
+    pub fn with_max_redials(mut self, max_redials: u8) -> Self {
+        self.ssh = self.ssh.with_max_redials(max_redials);
+        self
+    }
+
     /// Allows one exact application-trusted host fingerprint.
     #[must_use]
     pub fn with_trusted_host_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {

@@ -1,7 +1,9 @@
+use cyber_pumpkin_application::AppPreferences;
 use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::BackendId;
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_sftp::{PrivateKeyAuth, SftpAuth, SftpBackend, SftpConfig};
+use std::time::Duration;
 
 /// Authentication held only in the live pane connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +71,10 @@ impl PaneConnection {
         }
     }
 
+    pub(crate) const fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
+
     pub(crate) fn display_name(&self) -> String {
         match self {
             Self::Local { .. } => "Local".to_owned(),
@@ -92,9 +98,18 @@ impl PaneConnection {
                 auth,
                 trusted_fingerprint,
             } => {
+                let preferences = AppPreferences::load_default().unwrap_or_default();
                 let mut config = SftpConfig::new(id.clone(), host, username)
                     .map_err(|error| error.to_string())?
-                    .with_port(*port);
+                    .with_port(*port)
+                    .with_max_redials(2);
+
+                if preferences.advanced.keep_connections_alive {
+                    config = config.with_keepalive_interval(Some(Duration::from_secs(60)));
+                } else {
+                    config = config.with_keepalive_interval(None);
+                }
+
                 if let Some(fingerprint) = trusted_fingerprint {
                     config = config.with_trusted_host_fingerprint(fingerprint.clone());
                 }
