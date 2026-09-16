@@ -7,6 +7,8 @@ members = [
   "sdk/ssh/cyber-pumpkin-sftp",
   "sdk/ssh/cyber-pumpkin-ssh",
   "sdk/operations/cyber-pumpkin-operations",
+  "sdk/operations/cyber-pumpkin-scheduler",
+  "sdk/reliability/cyber-pumpkin-reliability",
   "sdk/rules/cyber-pumpkin-rules",
   "sdk/sync/cyber-pumpkin-sync-plan",
   "sdk/sync/cyber-pumpkin-sync",

@@ -71,6 +71,7 @@ dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
+ "cyber-pumpkin-reliability",
  "cyber-pumpkin-sftp",
  "cyber-pumpkin-sync",
  "cyber-pumpkin-sync-plan",
@@ -127,10 +128,27 @@ name = "cyber-pumpkin-operations"
 version = "0.1.0"
 
 [[package]]
+name = "cyber-pumpkin-reliability"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-local",
+ "cyber-pumpkin-transfer",
+]
+
+[[package]]
 name = "cyber-pumpkin-rules"
 version = "0.1.0"
 dependencies = [
  "cyber-pumpkin-core",
+]
+
+[[package]]
+name = "cyber-pumpkin-scheduler"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-operations",
 ]
 
 [[package]]
@@ -157,6 +175,7 @@ dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
+ "cyber-pumpkin-reliability",
  "cyber-pumpkin-sync-plan",
  "cyber-pumpkin-transfer",
 ]

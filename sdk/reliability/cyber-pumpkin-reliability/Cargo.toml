@@ -1,5 +1,5 @@
 [package]
-name = "cyber-pumpkin-sync"
+name = "cyber-pumpkin-reliability"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,6 @@ repository.workspace = true
 [dependencies]
 cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
-cyber-pumpkin-reliability = { path = "../../reliability/cyber-pumpkin-reliability" }
-cyber-pumpkin-sync-plan = { path = "../cyber-pumpkin-sync-plan" }
 cyber-pumpkin-transfer = { path = "../../transfer/cyber-pumpkin-transfer" }
 
 [dev-dependencies]

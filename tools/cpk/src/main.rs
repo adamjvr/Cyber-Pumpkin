@@ -4,6 +4,7 @@ use cyber_pumpkin_application::{ConnectionProfiles, SavedConnection};
 use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, FileEntry};
 use cyber_pumpkin_local::LocalBackend;
+use cyber_pumpkin_reliability::{ReliableTransferOutcome, execute_file_reliable};
 use cyber_pumpkin_sftp::{SftpAuth, SftpBackend, SftpConfig};
 use cyber_pumpkin_sync::{SyncExecutionOutcome, execute_plan};
 use cyber_pumpkin_sync_plan::{SyncOptions, plan_one_way};
@@ -26,6 +27,7 @@ USAGE:
   cpk local-mkdir <path>
   cpk local-rename <source> <destination>
   cpk local-rm <path>
+  cpk local-replace-safe <source> <destination>
   cpk sync-plan-local <source-dir> <destination-dir> [--delete-orphans]
   cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans]
   cpk profile-list
@@ -67,6 +69,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("local-mkdir") => local_mkdir_command(&mut args)?,
         Some("local-rename") => local_rename_command(&mut args)?,
         Some("local-rm") => local_remove_command(&mut args)?,
+        Some("local-replace-safe") => local_replace_safe_command(&mut args)?,
         Some("sync-plan-local") => sync_plan_local_command(&mut args)?,
         Some("sync-run-local") => sync_run_local_command(&mut args)?,
         Some("profile-list") => profile_list_command(&mut args)?,
@@ -143,6 +146,44 @@ fn local_remove_command(args: &mut impl Iterator<Item = String>) -> Result<(), B
     let path = next_arg(args, "path")?;
     ensure_finished(args)?;
     local_remove(&path)
+}
+
+fn local_replace_safe_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let source = next_arg(args, "source")?;
+    let destination = next_arg(args, "destination")?;
+    ensure_finished(args)?;
+
+    let backend_id = BackendId::new("local-reliable")?;
+    let backend = LocalBackend::new(backend_id.clone());
+    let outcome = execute_file_reliable(
+        TransferId::new(1)?,
+        Endpoint {
+            backend: backend_id.clone(),
+            path: BackendPath::new(source)?,
+        },
+        Endpoint {
+            backend: backend_id,
+            path: BackendPath::new(destination)?,
+        },
+        &backend,
+        &backend,
+        &CancellationToken::new(),
+        |_| {},
+    )?;
+
+    match outcome {
+        ReliableTransferOutcome::Completed(report) => println!(
+            "completed bytes={} replaced_existing={}",
+            report.bytes_copied(),
+            report.replaced_existing(),
+        ),
+        ReliableTransferOutcome::Cancelled { bytes_copied } => {
+            println!("cancelled bytes={bytes_copied}");
+        }
+    }
+    Ok(())
 }
 
 fn sync_plan_local_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {

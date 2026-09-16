@@ -10,6 +10,8 @@ Cyber-Pumpkin deliberately keeps reusable behavior in internal libraries.
 | `cyber-pumpkin-ssh` | TCP/SSH handshake, host trust, authentication |
 | `cyber-pumpkin-sftp` | SFTP filesystem provider consuming shared SSH |
 | `cyber-pumpkin-transfer` | streaming, verify, cancellation, recursive transfer |
+| `cyber-pumpkin-reliability` | staged, verified, recoverable destination replacement |
+| `cyber-pumpkin-scheduler` | dependency-aware simultaneous operation admission |
 | `cyber-pumpkin-operations` | generalized operation lifecycle and dependencies |
 | `cyber-pumpkin-rules` | reusable include/skip rules |
 | `cyber-pumpkin-sync-plan` | deterministic backend-neutral sync planning |

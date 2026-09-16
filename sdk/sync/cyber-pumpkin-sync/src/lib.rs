@@ -4,13 +4,11 @@
 //! [`cyber_pumpkin_sync_plan::SyncPlan`] and then execute that exact plan
 //! without re-planning or silently changing the requested work.
 
-use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
+use cyber_pumpkin_backend::{Backend, BackendError};
 use cyber_pumpkin_core::BackendPath;
+use cyber_pumpkin_reliability::{ReliabilityError, ReliableTransferOutcome, execute_file_reliable};
 use cyber_pumpkin_sync_plan::{SyncAction, SyncActionKind, SyncPlan};
-use cyber_pumpkin_transfer::{
-    CancellationToken, ControlledTransferOutcome, Endpoint, ExecutionError, TransferId,
-    TransferJob, TransferSpec, execute_file, execute_file_controlled,
-};
+use cyber_pumpkin_transfer::{CancellationToken, Endpoint, ExecutionError, TransferId};
 use std::fmt;
 
 /// Snapshot emitted while executing a synchronization plan.
@@ -100,6 +98,8 @@ pub enum SyncExecutionError {
     Backend(BackendError),
     /// A transfer operation failed.
     Transfer(ExecutionError),
+    /// Safe staging or finalization failed.
+    Reliability(ReliabilityError),
     /// The immutable plan contains a conflict that requires a decision.
     Conflict {
         /// Relative path requiring a decision.
@@ -121,6 +121,7 @@ impl fmt::Display for SyncExecutionError {
         match self {
             Self::Backend(error) => write!(formatter, "sync backend operation failed: {error}"),
             Self::Transfer(error) => write!(formatter, "sync transfer failed: {error}"),
+            Self::Reliability(error) => write!(formatter, "sync reliable transfer failed: {error}"),
             Self::Conflict { path } => {
                 write!(formatter, "sync plan contains unresolved conflict: {path}")
             }
@@ -144,13 +145,17 @@ impl From<ExecutionError> for SyncExecutionError {
         Self::Transfer(value)
     }
 }
+impl From<ReliabilityError> for SyncExecutionError {
+    fn from(value: ReliabilityError) -> Self {
+        Self::Reliability(value)
+    }
+}
 
 /// Executes an immutable synchronization plan.
 ///
-/// Cancellation is checked between every plan action and during controlled
-/// transfers whose destination does not already exist. Replacement of an
-/// existing destination currently uses the transfer layer's replace path; the
-/// staged atomic replacement reliability layer remains a separate milestone.
+/// Cancellation is checked between every plan action and throughout staged
+/// file transfer. File copies and replacements use the reliability layer's
+/// stage, verify, backup, atomic-finalize transaction.
 ///
 /// # Errors
 ///
@@ -273,53 +278,45 @@ where
     let destination_path = required_destination(action)?.clone();
     let transfer_id =
         TransferId::new(completed_actions.saturating_add(1)).map_err(ExecutionError::from)?;
-    let spec = TransferSpec {
-        source: Endpoint {
-            backend: source.id().clone(),
-            path: source_path,
-        },
-        destination: Endpoint {
-            backend: destination.id().clone(),
-            path: destination_path.clone(),
-        },
+    let source_endpoint = Endpoint {
+        backend: source.id().clone(),
+        path: source_path,
     };
-    let mut job = TransferJob::new(transfer_id, spec);
+    let destination_endpoint = Endpoint {
+        backend: destination.id().clone(),
+        path: destination_path,
+    };
 
-    match destination.stat(&destination_path) {
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            let outcome =
-                execute_file_controlled(&mut job, source, destination, cancellation, |progress| {
-                    on_progress(SyncExecutionProgress {
-                        completed_actions,
-                        total_actions,
-                        current_path: action.relative_path.clone(),
-                        current_bytes: progress.bytes_copied(),
-                        current_total_bytes: progress.total_bytes(),
-                    });
-                })?;
-            match outcome {
-                ControlledTransferOutcome::Completed(file_report) => {
-                    report.files_copied = report.files_copied.saturating_add(1);
-                    report.bytes_copied = report
-                        .bytes_copied
-                        .saturating_add(file_report.bytes_copied());
-                    Ok(ActionOutcome::Completed)
-                }
-                ControlledTransferOutcome::Cancelled { bytes_copied } => {
-                    report.bytes_copied = report.bytes_copied.saturating_add(bytes_copied);
-                    Ok(ActionOutcome::Cancelled)
-                }
-            }
-        }
-        Ok(_) => {
-            let file_report = execute_file(&mut job, source, destination)?;
+    let outcome = execute_file_reliable(
+        transfer_id,
+        source_endpoint,
+        destination_endpoint,
+        source,
+        destination,
+        cancellation,
+        |progress| {
+            on_progress(SyncExecutionProgress {
+                completed_actions,
+                total_actions,
+                current_path: action.relative_path.clone(),
+                current_bytes: progress.bytes_copied(),
+                current_total_bytes: progress.total_bytes(),
+            });
+        },
+    )?;
+
+    match outcome {
+        ReliableTransferOutcome::Completed(file_report) => {
             report.files_copied = report.files_copied.saturating_add(1);
             report.bytes_copied = report
                 .bytes_copied
                 .saturating_add(file_report.bytes_copied());
             Ok(ActionOutcome::Completed)
         }
-        Err(error) => Err(error.into()),
+        ReliableTransferOutcome::Cancelled { bytes_copied } => {
+            report.bytes_copied = report.bytes_copied.saturating_add(bytes_copied);
+            Ok(ActionOutcome::Cancelled)
+        }
     }
 }
 
@@ -403,6 +400,42 @@ mod tests {
         assert!(matches!(outcome, SyncExecutionOutcome::Completed(_)));
         assert_eq!(fs::read(destination_root.join("nested/a.txt"))?, b"alpha");
         assert!(!destination_root.join("orphan.txt").exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn replaces_existing_file_through_reliability_layer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = temp_root();
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&source_root)?;
+        fs::create_dir_all(&destination_root)?;
+        fs::write(source_root.join("a.txt"), b"new content")?;
+        fs::write(destination_root.join("a.txt"), b"old")?;
+
+        let source = LocalBackend::new(BackendId::new("source")?);
+        let destination = LocalBackend::new(BackendId::new("destination")?);
+        let plan = plan_one_way(
+            &source,
+            &backend_path(&source_root)?,
+            &destination,
+            &backend_path(&destination_root)?,
+            &SyncOptions::default(),
+        )?;
+
+        let outcome = execute_plan(
+            &plan,
+            &source,
+            &destination,
+            &CancellationToken::new(),
+            |_| {},
+        )?;
+        assert!(matches!(outcome, SyncExecutionOutcome::Completed(_)));
+        assert_eq!(fs::read(destination_root.join("a.txt"))?, b"new content");
+        assert_eq!(fs::read_dir(&destination_root)?.count(), 1);
+
         fs::remove_dir_all(root)?;
         Ok(())
     }
