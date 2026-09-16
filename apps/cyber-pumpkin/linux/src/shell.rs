@@ -209,6 +209,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
 
     let root = gtk::Box::new(Orientation::Vertical, 0);
     root.append(&header);
+    root.append(&build_linux_menu_bar());
     root.append(&browser_with_inspector);
 
     let window = adw::ApplicationWindow::builder()
@@ -218,6 +219,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
         .default_height(900)
         .content(&root)
         .build();
+    install_window_actions(app, &window);
     window.present();
 }
 
@@ -427,17 +429,25 @@ fn install_css() {
     }
 }
 
-fn build_menu_button() -> gtk::MenuButton {
+fn build_menu_model() -> gio::Menu {
     let menu = gio::Menu::new();
 
     let file = gio::Menu::new();
     file.append(Some("Quick Connect…"), Some("app.connect-sftp"));
+    file.append(Some("Pumpkin Patch"), Some("app.go-pumpkin-patch"));
     file.append(Some("Disconnect to Local"), Some("app.disconnect-local"));
     file.append(Some("New Folder…"), Some("app.new-folder"));
     file.append(Some("Rename…"), Some("app.rename"));
     file.append(Some("Delete…"), Some("app.delete"));
-    file.append(Some("Preferences…"), Some("app.preferences"));
+    file.append(Some("Close Window"), Some("app.close-window"));
+    file.append(Some("Quit Cyber-Pumpkin"), Some("app.quit"));
     menu.append_submenu(Some("File"), &file);
+
+    let edit = gio::Menu::new();
+    edit.append(Some("Rename…"), Some("app.rename"));
+    edit.append(Some("Delete…"), Some("app.delete"));
+    edit.append(Some("Preferences…"), Some("app.preferences"));
+    menu.append_submenu(Some("Edit"), &edit);
 
     let view = gio::Menu::new();
     view.append(Some("Refresh"), Some("app.refresh"));
@@ -459,16 +469,37 @@ fn build_menu_button() -> gtk::MenuButton {
     go.append(Some("Downloads"), Some("app.go-downloads"));
     go.append(Some("Desktop"), Some("app.go-desktop"));
     go.append(Some("Root"), Some("app.go-root"));
+    go.append(Some("Pumpkin Patch"), Some("app.go-pumpkin-patch"));
+    go.append(Some("Quick Connect"), Some("app.connect-sftp"));
     menu.append_submenu(Some("Go"), &go);
 
     let transfer = gio::Menu::new();
     transfer.append(Some("Copy to Other Pane"), Some("app.copy-other"));
+    transfer.append(Some("Sync Files"), Some("app.sync"));
+    transfer.append(Some("Activity"), Some("app.activity"));
     menu.append_submenu(Some("Transfer"), &transfer);
+
+    let window = gio::Menu::new();
+    window.append(Some("Inspector"), Some("app.info"));
+    window.append(Some("Close Window"), Some("app.close-window"));
+    menu.append_submenu(Some("Window"), &window);
 
     let help = gio::Menu::new();
     help.append(Some("About Cyber-Pumpkin"), Some("app.about"));
     menu.append_submenu(Some("Help"), &help);
 
+    menu
+}
+
+fn build_linux_menu_bar() -> gtk::PopoverMenuBar {
+    let menu = build_menu_model();
+    let bar = gtk::PopoverMenuBar::from_model(Some(&menu));
+    bar.set_hexpand(true);
+    bar
+}
+
+fn build_menu_button() -> gtk::MenuButton {
+    let menu = build_menu_model();
     gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .tooltip_text("Cyber-Pumpkin Menu")
@@ -609,6 +640,11 @@ fn install_go_actions(app: &adw::Application, context: &ActionContext) {
         let context = context.clone();
         move || active_workspace(&context).open_local("/")
     });
+
+    install_simple_action(app, "go-pumpkin-patch", {
+        let context = context.clone();
+        move || active_workspace(&context).show_pumpkin_patch()
+    });
 }
 
 fn install_transfer_action(app: &adw::Application, context: &ActionContext) {
@@ -616,6 +652,17 @@ fn install_transfer_action(app: &adw::Application, context: &ActionContext) {
     install_simple_action(app, "copy-other", move || match context.active.get() {
         PaneSide::Left => context.copy_bar.copy_between(&context.left, &context.right),
         PaneSide::Right => context.copy_bar.copy_between(&context.right, &context.left),
+    });
+}
+
+fn install_window_actions(app: &adw::Application, window: &adw::ApplicationWindow) {
+    install_simple_action(app, "close-window", {
+        let window = window.clone();
+        move || window.close()
+    });
+    install_simple_action(app, "quit", {
+        let app = app.clone();
+        move || app.quit()
     });
 }
 
@@ -655,6 +702,8 @@ fn install_accelerators(app: &adw::Application) {
     app.set_accels_for_action("app.info", &["<Primary>i"]);
     app.set_accels_for_action("app.copy-other", &["<Primary><Shift>c"]);
     app.set_accels_for_action("app.hidden", &["<Primary>period"]);
+    app.set_accels_for_action("app.close-window", &["<Primary>w"]);
+    app.set_accels_for_action("app.quit", &["<Primary>q"]);
 }
 
 fn show_new_folder_dialog(pane: &PaneHandle) {

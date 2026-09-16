@@ -65,9 +65,11 @@ final class BrowserWindowController: NSObject {
         let main = NSMenu()
         main.addItem(appMenuItem())
         main.addItem(fileMenuItem())
+        main.addItem(editMenuItem())
         main.addItem(viewMenuItem())
         main.addItem(goMenuItem())
         main.addItem(transferMenuItem())
+        main.addItem(windowMenuItem())
         main.addItem(helpMenuItem())
         NSApp.mainMenu = main
     }
@@ -75,7 +77,7 @@ final class BrowserWindowController: NSObject {
     private func appMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         item.title = "Cyber-Pumpkin"
-        let menu = NSMenu()
+        let menu = NSMenu(title: "Cyber-Pumpkin")
 
         addTargetedItem(
             menu,
@@ -84,6 +86,7 @@ final class BrowserWindowController: NSObject {
             "",
             []
         )
+        menu.addItem(.separator())
         addTargetedItem(
             menu,
             "Preferences…",
@@ -92,11 +95,48 @@ final class BrowserWindowController: NSObject {
             [.command]
         )
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Quit Cyber-Pumpkin",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
+
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        let services = NSMenu(title: "Services")
+        servicesItem.submenu = services
+        menu.addItem(servicesItem)
+        NSApp.servicesMenu = services
+
+        menu.addItem(.separator())
+        addResponderItem(
+            menu,
+            "Hide Cyber-Pumpkin",
+            #selector(NSApplication.hide(_:)),
+            "h",
+            [.command],
+            target: NSApp
         )
+        addResponderItem(
+            menu,
+            "Hide Others",
+            #selector(NSApplication.hideOtherApplications(_:)),
+            "h",
+            [.command, .option],
+            target: NSApp
+        )
+        addResponderItem(
+            menu,
+            "Show All",
+            #selector(NSApplication.unhideAllApplications(_:)),
+            "",
+            [],
+            target: NSApp
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            menu,
+            "Quit Cyber-Pumpkin",
+            #selector(NSApplication.terminate(_:)),
+            "q",
+            [.command],
+            target: NSApp
+        )
+
         item.submenu = menu
         return item
     }
@@ -155,6 +195,43 @@ final class BrowserWindowController: NSObject {
             "Refresh",
             #selector(refreshActive),
             "r",
+            [.command]
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            menu,
+            "Close Window",
+            #selector(NSWindow.performClose(_:)),
+            "w",
+            [.command]
+        )
+
+        item.submenu = menu
+        return item
+    }
+
+    private func editMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "Edit"
+        let menu = NSMenu(title: "Edit")
+
+        addResponderItem(menu, "Cut", #selector(NSText.cut(_:)), "x", [.command])
+        addResponderItem(menu, "Copy", #selector(NSText.copy(_:)), "c", [.command])
+        addResponderItem(menu, "Paste", #selector(NSText.paste(_:)), "v", [.command])
+        menu.addItem(.separator())
+        addResponderItem(
+            menu,
+            "Select All",
+            #selector(NSResponder.selectAll(_:)),
+            "a",
+            [.command]
+        )
+        menu.addItem(.separator())
+        addTargetedItem(
+            menu,
+            "Preferences…",
+            #selector(showPreferences),
+            ",",
             [.command]
         )
 
@@ -241,6 +318,40 @@ final class BrowserWindowController: NSObject {
         return item
     }
 
+    private func windowMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        item.title = "Window"
+        let menu = NSMenu(title: "Window")
+
+        addResponderItem(
+            menu,
+            "Minimize",
+            #selector(NSWindow.performMiniaturize(_:)),
+            "m",
+            [.command]
+        )
+        addResponderItem(
+            menu,
+            "Zoom",
+            #selector(NSWindow.performZoom(_:)),
+            "",
+            []
+        )
+        menu.addItem(.separator())
+        addResponderItem(
+            menu,
+            "Bring All to Front",
+            #selector(NSApplication.arrangeInFront(_:)),
+            "",
+            [],
+            target: NSApp
+        )
+
+        item.submenu = menu
+        NSApp.windowsMenu = menu
+        return item
+    }
+
     private func helpMenuItem() -> NSMenuItem {
         let item = NSMenuItem()
         item.title = "Help"
@@ -298,6 +409,24 @@ final class BrowserWindowController: NSObject {
             keyEquivalent: keyEquivalent
         )
         item.target = self
+        item.keyEquivalentModifierMask = modifiers
+        menu.addItem(item)
+    }
+
+    private func addResponderItem(
+        _ menu: NSMenu,
+        _ title: String,
+        _ action: Selector,
+        _ keyEquivalent: String,
+        _ modifiers: NSEvent.ModifierFlags,
+        target: AnyObject? = nil
+    ) {
+        let item = NSMenuItem(
+            title: title,
+            action: action,
+            keyEquivalent: keyEquivalent
+        )
+        item.target = target
         item.keyEquivalentModifierMask = modifiers
         menu.addItem(item)
     }
