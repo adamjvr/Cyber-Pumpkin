@@ -167,6 +167,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cyber-pumpkin-secrets"
+version = "0.1.0"
+
+[[package]]
 name = "cyber-pumpkin-sftp"
 version = "0.1.0"
 dependencies = [

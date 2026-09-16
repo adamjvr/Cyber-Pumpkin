@@ -2,6 +2,7 @@
 
 mod preferences;
 mod profiles;
+mod trust;
 
 pub use preferences::{
     AdvancedPreferences, AppPreferences, DoubleClickAction, ExistingItemAction, FilePreferences,
@@ -10,6 +11,7 @@ pub use preferences::{
 pub use profiles::{
     ConnectionProfiles, SavedConnection, application_support_directory, default_profiles_path,
 };
+pub use trust::{TrustedHost, TrustedHosts, default_trusted_hosts_path};
 
 use cyber_pumpkin_core::{BackendId, BackendPath};
 
