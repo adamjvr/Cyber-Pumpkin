@@ -12,6 +12,7 @@ adw = { version = "0.9.2", package = "libadwaita", features = ["v1_1", "gtk_v4_6
 cyber-pumpkin-application = { version = "0.1.0", path = "../../../sdk/application/cyber-pumpkin-application" }
 cyber-pumpkin-backend = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { version = "0.1.0", path = "../../../sdk/foundation/cyber-pumpkin-core" }
+cyber-pumpkin-decisions = { version = "0.1.0", path = "../../../sdk/decisions/cyber-pumpkin-decisions" }
 cyber-pumpkin-history = { version = "0.1.0", path = "../../../sdk/history/cyber-pumpkin-history" }
 cyber-pumpkin-local = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-local" }
 cyber-pumpkin-sftp = { version = "0.1.0", path = "../../../sdk/ssh/cyber-pumpkin-sftp" }

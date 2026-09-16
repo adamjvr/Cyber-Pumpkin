@@ -6,10 +6,13 @@ use crate::preferences_ui;
 use crate::sync_ui::SyncPanel;
 use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
+use cyber_pumpkin_application::AppPreferences;
+use cyber_pumpkin_decisions::{DecisionCenter, DecisionChoice, DecisionKind, DecisionScope};
+use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use gtk::Orientation;
 use gtk::gio;
 use gtk::glib::variant::ToVariant;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -25,6 +28,7 @@ struct ActionContext {
     inspector_button: gtk::ToggleButton,
     activity_popover: gtk::Popover,
     activity_list: gtk::ListBox,
+    decision_center: Rc<RefCell<DecisionCenter>>,
     main_stack: gtk::Stack,
     sync_panel: SyncPanel,
     title: gtk::Label,
@@ -110,6 +114,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
     }
 
     let activity_list = activity::create_activity_list();
+    let decision_center = Rc::new(RefCell::new(DecisionCenter::new()));
     let activity_popover = create_activity_popover(&activity_list);
     let copy_bar = build_copy_bar(&left, &right, &activity_list);
 
@@ -124,7 +129,14 @@ pub(crate) fn build_ui(app: &adw::Application) {
     main_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     main_stack.add_named(&browser_page, Some("browser"));
 
-    let sync_panel = SyncPanel::new(&left, &right, &main_stack, &title, &activity_list);
+    let sync_panel = SyncPanel::new(
+        &left,
+        &right,
+        &main_stack,
+        &title,
+        &activity_list,
+        Rc::clone(&decision_center),
+    );
     main_stack.add_named(&sync_panel.root, Some("sync"));
 
     let browser_with_inspector = gtk::Paned::new(Orientation::Horizontal);
@@ -164,6 +176,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
         inspector_button: inspector_button.clone(),
         activity_popover: activity_popover.clone(),
         activity_list: activity_list.clone(),
+        decision_center: Rc::clone(&decision_center),
         main_stack: main_stack.clone(),
         sync_panel: sync_panel.clone(),
         title: title.clone(),
@@ -426,7 +439,13 @@ fn install_file_actions(app: &adw::Application, context: &ActionContext) {
     });
     install_simple_action(app, "delete", {
         let context = context.clone();
-        move || show_delete_dialog(active_pane(&context))
+        move || {
+            show_delete_dialog(
+                active_pane(&context),
+                &context.activity_list,
+                Rc::clone(&context.decision_center),
+            );
+        }
     });
 }
 
@@ -629,32 +648,105 @@ where
     dialog.present();
 }
 
-fn show_delete_dialog(pane: &PaneHandle) {
+fn show_delete_dialog(
+    pane: &PaneHandle,
+    activity_list: &gtk::ListBox,
+    decision_center: Rc<RefCell<DecisionCenter>>,
+) {
     let Some(name) = pane.selected_name() else {
         return;
     };
+
+    let confirm =
+        AppPreferences::load_default().map_or(true, |preferences| preferences.files.confirm_delete);
+    if !confirm {
+        perform_delete(pane, activity_list);
+        return;
+    }
+
+    let request = decision_center.borrow_mut().request(
+        DecisionKind::DeleteConfirmation,
+        name.clone(),
+        format!("Delete “{name}”?"),
+        vec![DecisionChoice::Delete, DecisionChoice::Cancel],
+    );
+    let Ok((decision_id, immediate)) = request else {
+        return;
+    };
+
+    if let Some(resolution) = immediate {
+        if resolution.choice == DecisionChoice::Delete {
+            perform_delete(pane, activity_list);
+        }
+        return;
+    }
+
     let dialog = gtk::Dialog::builder().title("Delete").modal(true).build();
     dialog.add_button("Cancel", gtk::ResponseType::Cancel);
     dialog.add_button("Delete", gtk::ResponseType::Accept);
+
+    let content = gtk::Box::new(Orientation::Vertical, 8);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
 
     let label = gtk::Label::new(Some(&format!(
         "Delete “{name}”? Non-empty folders are not removed recursively yet."
     )));
     label.set_wrap(true);
-    label.set_margin_top(16);
-    label.set_margin_bottom(16);
-    label.set_margin_start(16);
-    label.set_margin_end(16);
-    dialog.content_area().append(&label);
+    label.set_xalign(0.0);
+    content.append(&label);
+
+    let remember = gtk::CheckButton::with_label("Use this choice for deletes this session");
+    content.append(&remember);
+    dialog.content_area().append(&content);
 
     let pane = pane.clone();
+    let activity_list = activity_list.clone();
     dialog.connect_response(move |dialog, response| {
-        if response == gtk::ResponseType::Accept {
-            pane.delete_selected();
+        let choice = if response == gtk::ResponseType::Accept {
+            DecisionChoice::Delete
+        } else {
+            DecisionChoice::Cancel
+        };
+        let scope = if remember.is_active() {
+            DecisionScope::AllMatching
+        } else {
+            DecisionScope::ThisItem
+        };
+        if let Err(error) = decision_center
+            .borrow_mut()
+            .resolve(decision_id, choice, scope)
+        {
+            eprintln!("failed to resolve delete decision: {error}");
+        } else if choice == DecisionChoice::Delete {
+            perform_delete(&pane, &activity_list);
         }
         dialog.close();
     });
     dialog.present();
+}
+
+fn perform_delete(pane: &PaneHandle, activity_list: &gtk::ListBox) {
+    match pane.delete_selected() {
+        Ok(name) => activity::record(
+            activity_list,
+            None,
+            HistoryKind::Delete,
+            HistoryState::Completed,
+            &format!("Delete {name}"),
+            "Deleted",
+        ),
+        Err(error) => activity::record(
+            activity_list,
+            None,
+            HistoryKind::Delete,
+            HistoryState::Failed,
+            "Delete",
+            &error,
+        ),
+    }
 }
 
 fn active_pane(context: &ActionContext) -> &PaneHandle {

@@ -317,9 +317,10 @@ fn combine_actions(buckets: ActionBuckets, removals: Vec<SyncAction>) -> Vec<Syn
             + buckets.skipped.len()
             + removals.len(),
     );
+    // Conflicting parents must resolve before descendant creates/copies.
+    actions.extend(buckets.conflicts);
     actions.extend(buckets.create_dirs);
     actions.extend(buckets.copy_files);
-    actions.extend(buckets.conflicts);
     actions.extend(buckets.skipped);
     actions.extend(removals);
     actions

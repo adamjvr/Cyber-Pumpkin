@@ -9,7 +9,7 @@ use cyber_pumpkin_history::HistoryLog;
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_reliability::{ReliableTransferOutcome, execute_file_reliable};
 use cyber_pumpkin_sftp::{SftpAuth, SftpBackend, SftpConfig};
-use cyber_pumpkin_sync::{SyncExecutionOutcome, execute_plan};
+use cyber_pumpkin_sync::{ConflictPolicy, SyncExecutionOutcome, execute_plan_with_conflicts};
 use cyber_pumpkin_sync_plan::{SyncOptions, plan_one_way};
 use cyber_pumpkin_transfer::{
     CancellationToken, DestinationPolicy, Endpoint, TransferId, TransferJob, TransferSpec,
@@ -32,7 +32,7 @@ USAGE:
   cpk local-rm <path>
   cpk local-replace-safe <source> <destination>
   cpk sync-plan-local <source-dir> <destination-dir> [--delete-orphans]
-  cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans]
+  cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans] [--conflicts=fail|skip|replace]
   cpk history-list
   cpk history-clear
   cpk profile-list
@@ -219,14 +219,15 @@ fn sync_plan_local_command(args: &mut impl Iterator<Item = String>) -> Result<()
 fn sync_run_local_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     let source = next_arg(args, "source-dir")?;
     let destination = next_arg(args, "destination-dir")?;
-    let options = sync_options(args)?;
+    let (options, conflict_policy) = sync_run_options(args)?;
     let (source_backend, destination_backend, plan) =
         local_sync_plan(&source, &destination, &options)?;
-    let outcome = execute_plan(
+    let outcome = execute_plan_with_conflicts(
         &plan,
         &source_backend,
         &destination_backend,
         &CancellationToken::new(),
+        conflict_policy,
         |_| {},
     )?;
     match outcome {
@@ -248,6 +249,37 @@ fn sync_run_local_command(args: &mut impl Iterator<Item = String>) -> Result<(),
         ),
     }
     Ok(())
+}
+
+fn sync_run_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(SyncOptions, ConflictPolicy), Box<dyn Error>> {
+    let mut delete_orphans = false;
+    let mut conflict_policy = ConflictPolicy::Fail;
+
+    for option in args {
+        match option.as_str() {
+            "--delete-orphans" => delete_orphans = true,
+            "--conflicts=fail" => conflict_policy = ConflictPolicy::Fail,
+            "--conflicts=skip" => conflict_policy = ConflictPolicy::Skip,
+            "--conflicts=replace" => conflict_policy = ConflictPolicy::Replace,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected sync option: {other}"),
+                )
+                .into());
+            }
+        }
+    }
+
+    Ok((
+        SyncOptions {
+            delete_orphans,
+            ..SyncOptions::default()
+        },
+        conflict_policy,
+    ))
 }
 
 fn sync_options(args: &mut impl Iterator<Item = String>) -> Result<SyncOptions, Box<dyn Error>> {

@@ -1,10 +1,12 @@
 use crate::activity;
 use crate::browser::{PaneHandle, format_size};
 use adw::prelude::*;
+use cyber_pumpkin_decisions::{DecisionCenter, DecisionChoice, DecisionKind, DecisionScope};
 use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_operations::{OperationId, OperationKind, OperationProgress, OperationQueue};
 use cyber_pumpkin_sync::{
-    SyncExecutionOutcome, SyncExecutionProgress, SyncExecutionReport, execute_plan,
+    ConflictPolicy, SyncExecutionOutcome, SyncExecutionProgress, SyncExecutionReport,
+    execute_plan_with_conflicts,
 };
 use cyber_pumpkin_sync_plan::{SyncActionKind, SyncOptions, SyncPlan, plan_one_way};
 use cyber_pumpkin_transfer::CancellationToken;
@@ -49,6 +51,7 @@ pub(crate) struct SyncPanel {
     main_stack: gtk::Stack,
     title: gtk::Label,
     activity_list: gtk::ListBox,
+    decision_center: Rc<RefCell<DecisionCenter>>,
 }
 
 enum PreviewEvent {
@@ -68,6 +71,7 @@ impl SyncPanel {
         main_stack: &gtk::Stack,
         title: &gtk::Label,
         activity_list: &gtk::ListBox,
+        decision_center: Rc<RefCell<DecisionCenter>>,
     ) -> Self {
         let root = gtk::Box::new(Orientation::Vertical, 14);
         root.set_margin_top(22);
@@ -155,6 +159,7 @@ impl SyncPanel {
             main_stack: main_stack.clone(),
             title: title.clone(),
             activity_list: activity_list.clone(),
+            decision_center,
         };
         panel.connect_actions();
         panel
@@ -166,6 +171,7 @@ impl SyncPanel {
         self.clear_preview();
         self.summary
             .set_text("Simulate to build an immutable sync plan.");
+        self.synchronize.set_label("Synchronize");
         self.synchronize.set_sensitive(false);
         *self.prepared.borrow_mut() = None;
     }
@@ -272,7 +278,12 @@ impl SyncPanel {
             Ok(plan) => {
                 self.render_plan(&plan);
                 let conflicts = plan.summary().conflicts;
-                self.synchronize.set_sensitive(conflicts == 0);
+                self.synchronize.set_label(if conflicts == 0 {
+                    "Synchronize"
+                } else {
+                    "Resolve & Synchronize"
+                });
+                self.synchronize.set_sensitive(true);
                 *self.prepared.borrow_mut() = Some(PreparedPlan { direction, plan });
             }
             Err(error) => {
@@ -320,12 +331,108 @@ impl SyncPanel {
             self.summary.set_text("Simulate before synchronizing.");
             return;
         };
-        if prepared.plan.summary().conflicts > 0 {
-            self.summary
-                .set_text("Resolve plan conflicts before synchronizing.");
+
+        if prepared.plan.summary().conflicts == 0 {
+            self.start_execution_with_policy(prepared, ConflictPolicy::Fail);
             return;
         }
 
+        self.request_conflict_decision(prepared);
+    }
+
+    fn request_conflict_decision(&self, prepared: PreparedPlan) {
+        let conflict_count = prepared.plan.summary().conflicts;
+        let request = self.decision_center.borrow_mut().request(
+            DecisionKind::TypeConflict,
+            format!("{conflict_count} sync type conflicts"),
+            "Source and destination contain different entry types at matching paths.",
+            vec![
+                DecisionChoice::Replace,
+                DecisionChoice::Skip,
+                DecisionChoice::Cancel,
+            ],
+        );
+        let Ok((decision_id, immediate)) = request else {
+            self.summary.set_text("Could not create conflict decision.");
+            return;
+        };
+
+        if let Some(resolution) = immediate {
+            self.apply_conflict_choice(prepared, resolution.choice);
+            return;
+        }
+
+        let dialog = gtk::Dialog::builder()
+            .title("Resolve Sync Conflicts")
+            .modal(true)
+            .build();
+        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("Skip All", gtk::ResponseType::Other(1));
+        dialog.add_button("Replace All", gtk::ResponseType::Accept);
+
+        let content = gtk::Box::new(Orientation::Vertical, 8);
+        content.set_margin_top(16);
+        content.set_margin_bottom(16);
+        content.set_margin_start(16);
+        content.set_margin_end(16);
+
+        let label = gtk::Label::new(Some(&format!(
+            "{conflict_count} paths have different item types. Replace removes the conflicting destination tree before rebuilding the source shape."
+        )));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        content.append(&label);
+
+        let remember =
+            gtk::CheckButton::with_label("Use this choice for matching conflicts this session");
+        content.append(&remember);
+        dialog.content_area().append(&content);
+
+        let panel = self.clone();
+        dialog.connect_response(move |dialog, response| {
+            let choice = match response {
+                gtk::ResponseType::Accept => DecisionChoice::Replace,
+                gtk::ResponseType::Other(1) => DecisionChoice::Skip,
+                _ => DecisionChoice::Cancel,
+            };
+            let scope = if remember.is_active() {
+                DecisionScope::AllMatching
+            } else {
+                DecisionScope::ThisItem
+            };
+            if let Err(error) =
+                panel
+                    .decision_center
+                    .borrow_mut()
+                    .resolve(decision_id, choice, scope)
+            {
+                panel
+                    .summary
+                    .set_text(&format!("Could not resolve conflicts: {error}"));
+            } else {
+                panel.apply_conflict_choice(prepared.clone(), choice);
+            }
+            dialog.close();
+        });
+        dialog.present();
+    }
+
+    fn apply_conflict_choice(&self, prepared: PreparedPlan, choice: DecisionChoice) {
+        match choice {
+            DecisionChoice::Replace => {
+                self.start_execution_with_policy(prepared, ConflictPolicy::Replace);
+            }
+            DecisionChoice::Skip => {
+                self.start_execution_with_policy(prepared, ConflictPolicy::Skip);
+            }
+            _ => {
+                self.summary
+                    .set_text("Synchronization cancelled before execution.");
+            }
+        }
+    }
+
+    fn start_execution_with_policy(&self, prepared: PreparedPlan, conflict_policy: ConflictPolicy) {
         let operation_id = match self.operation_queue.borrow_mut().enqueue(
             OperationKind::Sync,
             "Synchronize panes",
@@ -363,11 +470,12 @@ impl SyncPanel {
                 let source_backend = source_connection.connect_backend()?;
                 let destination_backend = destination_connection.connect_backend()?;
                 let progress_sender = sender.clone();
-                execute_plan(
+                execute_plan_with_conflicts(
                     &plan,
                     source_backend.as_ref(),
                     destination_backend.as_ref(),
                     &cancellation,
+                    conflict_policy,
                     move |progress| {
                         let _sent = progress_sender.send(ExecutionEvent::Progress(progress));
                     },

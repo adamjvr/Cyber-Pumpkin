@@ -4,8 +4,8 @@
 //! [`cyber_pumpkin_sync_plan::SyncPlan`] and then execute that exact plan
 //! without re-planning or silently changing the requested work.
 
-use cyber_pumpkin_backend::{Backend, BackendError};
-use cyber_pumpkin_core::BackendPath;
+use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
+use cyber_pumpkin_core::{BackendPath, EntryKind};
 use cyber_pumpkin_reliability::{ReliabilityError, ReliableTransferOutcome, execute_file_reliable};
 use cyber_pumpkin_sync_plan::{SyncAction, SyncActionKind, SyncPlan};
 use cyber_pumpkin_transfer::{CancellationToken, Endpoint, ExecutionError, TransferId};
@@ -91,6 +91,18 @@ pub enum SyncExecutionOutcome {
     Cancelled(SyncExecutionReport),
 }
 
+/// Policy used when an immutable sync plan contains type conflicts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ConflictPolicy {
+    /// Refuse execution until the caller resolves conflicts.
+    #[default]
+    Fail,
+    /// Preserve the destination object and count the conflict as skipped.
+    Skip,
+    /// Replace the conflicting destination tree with the source object.
+    Replace,
+}
+
 /// Synchronization execution failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SyncExecutionError {
@@ -166,6 +178,33 @@ pub fn execute_plan<F>(
     source: &dyn Backend,
     destination: &dyn Backend,
     cancellation: &CancellationToken,
+    on_progress: F,
+) -> Result<SyncExecutionOutcome, SyncExecutionError>
+where
+    F: FnMut(SyncExecutionProgress),
+{
+    execute_plan_with_conflicts(
+        plan,
+        source,
+        destination,
+        cancellation,
+        ConflictPolicy::Fail,
+        on_progress,
+    )
+}
+
+/// Executes an immutable plan with an explicit type-conflict policy.
+///
+/// # Errors
+///
+/// Returns [`SyncExecutionError`] for malformed plans, backend failures,
+/// transfer failures, or conflicts when [`ConflictPolicy::Fail`] is selected.
+pub fn execute_plan_with_conflicts<F>(
+    plan: &SyncPlan,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    cancellation: &CancellationToken,
+    conflict_policy: ConflictPolicy,
     mut on_progress: F,
 ) -> Result<SyncExecutionOutcome, SyncExecutionError>
 where
@@ -189,6 +228,7 @@ where
             cancellation,
             completed_actions,
             total_actions,
+            conflict_policy,
             &mut report,
             &mut on_progress,
         )?;
@@ -223,6 +263,7 @@ fn execute_action<F>(
     cancellation: &CancellationToken,
     completed_actions: u64,
     total_actions: u64,
+    conflict_policy: ConflictPolicy,
     report: &mut SyncExecutionReport,
     on_progress: &mut F,
 ) -> Result<ActionOutcome, SyncExecutionError>
@@ -246,13 +287,22 @@ where
             on_progress,
         ),
         SyncActionKind::RemoveFile | SyncActionKind::RemoveDirectory => {
-            destination.remove(required_destination(action)?)?;
-            report.entries_removed = report.entries_removed.saturating_add(1);
+            if remove_if_present(destination, required_destination(action)?)? {
+                report.entries_removed = report.entries_removed.saturating_add(1);
+            }
             Ok(ActionOutcome::Completed)
         }
-        SyncActionKind::Conflict => Err(SyncExecutionError::Conflict {
-            path: action.relative_path.clone(),
-        }),
+        SyncActionKind::Conflict => execute_conflict(
+            action,
+            source,
+            destination,
+            cancellation,
+            completed_actions,
+            total_actions,
+            conflict_policy,
+            report,
+            on_progress,
+        ),
         SyncActionKind::Skip => {
             report.skipped = report.skipped.saturating_add(1);
             Ok(ActionOutcome::Completed)
@@ -317,6 +367,114 @@ where
             report.bytes_copied = report.bytes_copied.saturating_add(bytes_copied);
             Ok(ActionOutcome::Cancelled)
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_conflict<F>(
+    action: &SyncAction,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    cancellation: &CancellationToken,
+    completed_actions: u64,
+    total_actions: u64,
+    conflict_policy: ConflictPolicy,
+    report: &mut SyncExecutionReport,
+    on_progress: &mut F,
+) -> Result<ActionOutcome, SyncExecutionError>
+where
+    F: FnMut(SyncExecutionProgress),
+{
+    match conflict_policy {
+        ConflictPolicy::Fail => Err(SyncExecutionError::Conflict {
+            path: action.relative_path.clone(),
+        }),
+        ConflictPolicy::Skip => {
+            report.skipped = report.skipped.saturating_add(1);
+            Ok(ActionOutcome::Completed)
+        }
+        ConflictPolicy::Replace => replace_conflict(
+            action,
+            source,
+            destination,
+            cancellation,
+            completed_actions,
+            total_actions,
+            report,
+            on_progress,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_conflict<F>(
+    action: &SyncAction,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    cancellation: &CancellationToken,
+    completed_actions: u64,
+    total_actions: u64,
+    report: &mut SyncExecutionReport,
+    on_progress: &mut F,
+) -> Result<ActionOutcome, SyncExecutionError>
+where
+    F: FnMut(SyncExecutionProgress),
+{
+    let source_entry = source.stat(required_source(action)?)?;
+    let removed = remove_tree_if_present(destination, required_destination(action)?)?;
+    report.entries_removed = report.entries_removed.saturating_add(removed);
+
+    match source_entry.kind {
+        EntryKind::Directory => {
+            destination.create_dir(required_destination(action)?)?;
+            report.directories_created = report.directories_created.saturating_add(1);
+            Ok(ActionOutcome::Completed)
+        }
+        EntryKind::File => execute_copy(
+            action,
+            source,
+            destination,
+            cancellation,
+            completed_actions,
+            total_actions,
+            report,
+            on_progress,
+        ),
+        EntryKind::Symlink | EntryKind::Other => {
+            report.skipped = report.skipped.saturating_add(1);
+            Ok(ActionOutcome::Completed)
+        }
+    }
+}
+
+fn remove_tree_if_present(
+    backend: &dyn Backend,
+    path: &BackendPath,
+) -> Result<u64, SyncExecutionError> {
+    let entry = match backend.stat(path) {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut removed = 0_u64;
+    if entry.kind == EntryKind::Directory {
+        for child in backend.list(path)? {
+            removed = removed.saturating_add(remove_tree_if_present(backend, &child.path)?);
+        }
+    }
+    backend.remove(path)?;
+    Ok(removed.saturating_add(1))
+}
+
+fn remove_if_present(
+    backend: &dyn Backend,
+    path: &BackendPath,
+) -> Result<bool, SyncExecutionError> {
+    match backend.remove(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -464,6 +622,84 @@ mod tests {
         let outcome = execute_plan(&plan, &source, &destination, &cancellation, |_| {})?;
         assert!(matches!(outcome, SyncExecutionOutcome::Cancelled(_)));
         assert!(!destination_root.join("a.txt").exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn replace_policy_resolves_file_over_directory_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{ConflictPolicy, execute_plan_with_conflicts};
+
+        let root = temp_root();
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&source_root)?;
+        fs::create_dir_all(destination_root.join("node/nested"))?;
+        fs::write(source_root.join("node"), b"replacement-file")?;
+        fs::write(destination_root.join("node/nested/old.txt"), b"old")?;
+
+        let source = LocalBackend::new(BackendId::new("source")?);
+        let destination = LocalBackend::new(BackendId::new("destination")?);
+        let plan = plan_one_way(
+            &source,
+            &backend_path(&source_root)?,
+            &destination,
+            &backend_path(&destination_root)?,
+            &SyncOptions::default(),
+        )?;
+        assert_eq!(plan.summary().conflicts, 1);
+
+        let outcome = execute_plan_with_conflicts(
+            &plan,
+            &source,
+            &destination,
+            &CancellationToken::new(),
+            ConflictPolicy::Replace,
+            |_| {},
+        )?;
+        assert!(matches!(outcome, SyncExecutionOutcome::Completed(_)));
+        assert_eq!(
+            fs::read(destination_root.join("node"))?,
+            b"replacement-file"
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn skip_policy_preserves_conflicting_destination() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{ConflictPolicy, execute_plan_with_conflicts};
+
+        let root = temp_root();
+        let source_root = root.join("source");
+        let destination_root = root.join("destination");
+        fs::create_dir_all(&source_root)?;
+        fs::create_dir_all(destination_root.join("node"))?;
+        fs::write(source_root.join("node"), b"replacement-file")?;
+        fs::write(destination_root.join("node/keep.txt"), b"keep")?;
+
+        let source = LocalBackend::new(BackendId::new("source")?);
+        let destination = LocalBackend::new(BackendId::new("destination")?);
+        let plan = plan_one_way(
+            &source,
+            &backend_path(&source_root)?,
+            &destination,
+            &backend_path(&destination_root)?,
+            &SyncOptions::default(),
+        )?;
+
+        let outcome = execute_plan_with_conflicts(
+            &plan,
+            &source,
+            &destination,
+            &CancellationToken::new(),
+            ConflictPolicy::Skip,
+            |_| {},
+        )?;
+        assert!(matches!(outcome, SyncExecutionOutcome::Completed(_)));
+        assert_eq!(fs::read(destination_root.join("node/keep.txt"))?, b"keep");
+
         fs::remove_dir_all(root)?;
         Ok(())
     }

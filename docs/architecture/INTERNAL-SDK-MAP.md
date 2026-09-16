@@ -45,3 +45,5 @@ Rust libraries own behavior.
 - `cyber-pumpkin-secrets` with Keychain / Secret Service adapters
 - `cyber-pumpkin-platform` for notifications, clipboard, dialogs, filesystem watch, trash, terminal, and updates
 - provider crates such as FTP only when actually implemented
+
+Pass 13 rule: native shells render decisions; shared decision and sync libraries own allowed choices and conflict semantics.

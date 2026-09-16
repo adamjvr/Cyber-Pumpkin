@@ -276,32 +276,33 @@ impl PaneHandle {
         }
     }
 
-    pub(crate) fn delete_selected(&self) {
+    pub(crate) fn delete_selected(&self) -> Result<String, String> {
         let Some(entry) = self.selected_entry() else {
-            self.widgets.footer.set_text("Select an item to delete.");
-            return;
+            let message = "Select an item to delete.".to_owned();
+            self.widgets.footer.set_text(&message);
+            return Err(message);
         };
-        let backend = match self.connection.borrow().connect_backend() {
-            Ok(backend) => backend,
-            Err(error) => {
+        let backend = self
+            .connection
+            .borrow()
+            .connect_backend()
+            .map_err(|error| {
                 self.widgets
                     .footer
                     .set_text(&format!("Connect failed: {error}"));
-                return;
-            }
-        };
-        match backend.remove(&entry.path) {
-            Ok(()) => {
-                self.widgets
-                    .footer
-                    .set_text(&format!("Deleted {}", entry.name));
-                self.refresh();
-            }
-            Err(error) => self
-                .widgets
-                .footer
-                .set_text(&format!("Delete failed: {error}")),
-        }
+                error
+            })?;
+        backend.remove(&entry.path).map_err(|error| {
+            let message = format!("Delete failed: {error}");
+            self.widgets.footer.set_text(&message);
+            message
+        })?;
+
+        self.widgets
+            .footer
+            .set_text(&format!("Deleted {}", entry.name));
+        self.refresh();
+        Ok(entry.name)
     }
 
     pub(crate) fn selected_name(&self) -> Option<String> {
