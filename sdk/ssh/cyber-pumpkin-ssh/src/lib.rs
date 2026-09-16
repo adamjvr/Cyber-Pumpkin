@@ -1,6 +1,6 @@
 //! Shared SSH transport, host-trust, and authentication layer.
 
-use ssh2::{CheckResult, KnownHostFileKind, Session};
+use ssh2::{CheckResult, HashType, KnownHostFileKind, Session};
 use std::fmt;
 use std::io;
 use std::net::TcpStream;
@@ -80,6 +80,7 @@ pub struct SshConfig {
     username: String,
     known_hosts_file: PathBuf,
     timeout: Duration,
+    trusted_host_fingerprint: Option<String>,
 }
 
 impl SshConfig {
@@ -118,6 +119,7 @@ impl SshConfig {
             username,
             known_hosts_file: PathBuf::from(home).join(".ssh/known_hosts"),
             timeout: DEFAULT_TIMEOUT,
+            trusted_host_fingerprint: None,
         })
     }
 
@@ -139,6 +141,14 @@ impl SshConfig {
     #[must_use]
     pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Allows one exact application-trusted fingerprint for an otherwise
+    /// unknown host. A `known_hosts` mismatch is never bypassed.
+    #[must_use]
+    pub fn with_trusted_host_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.trusted_host_fingerprint = Some(fingerprint.into());
         self
     }
 
@@ -171,9 +181,16 @@ impl SshConfig {
     pub const fn timeout(&self) -> Duration {
         self.timeout
     }
+
+    /// Returns the explicit application trust override.
+    #[must_use]
+    pub fn trusted_host_fingerprint(&self) -> Option<&str> {
+        self.trusted_host_fingerprint.as_deref()
+    }
 }
 
 /// Private-key authentication material.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrivateKeyAuth {
     private_key: PathBuf,
     public_key: Option<PathBuf>,
@@ -207,11 +224,84 @@ impl PrivateKeyAuth {
 }
 
 /// SSH authentication mode.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SshAuth {
     /// SSH agent.
     Agent,
+    /// Username/password authentication. Password remains in memory only.
+    Password(String),
     /// Private key.
     PrivateKey(Box<PrivateKeyAuth>),
+}
+
+/// Host-key relationship to OpenSSH `known_hosts`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostKeyStatus {
+    /// Host key matches `known_hosts`.
+    Match,
+    /// Host is absent from `known_hosts`.
+    Unknown,
+    /// Host exists but the presented key differs.
+    Mismatch,
+    /// `known_hosts` could not classify the key.
+    Failure,
+}
+
+/// Host-key probe result produced before authentication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostKeyProbe {
+    fingerprint: String,
+    status: HostKeyStatus,
+}
+
+impl HostKeyProbe {
+    /// Returns the SHA-256 host-key fingerprint.
+    #[must_use]
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Returns known-hosts status.
+    #[must_use]
+    pub const fn status(&self) -> HostKeyStatus {
+        self.status
+    }
+}
+
+/// Performs TCP + SSH handshake and returns host identity without authenticating.
+///
+/// # Errors
+///
+/// Returns [`SshError`] for transport, protocol, or host-key failures.
+pub fn probe_host_key(config: &SshConfig) -> Result<HostKeyProbe, SshError> {
+    validate_config(config)?;
+    let session = handshake_session(config)?;
+    let (host_key, _) = session.host_key().ok_or_else(|| {
+        SshError::new(
+            SshErrorKind::HostKey,
+            "read SSH host key",
+            "server did not provide a host key",
+        )
+    })?;
+    let fingerprint = host_key_fingerprint(&session)?;
+    let mut known_hosts = session.known_hosts().map_err(|error| {
+        SshError::new(
+            SshErrorKind::HostKey,
+            "initialize known_hosts",
+            error.to_string(),
+        )
+    })?;
+    load_known_hosts(&mut known_hosts, config)?;
+    let status = match known_hosts.check_port(config.host(), config.port(), host_key) {
+        CheckResult::Match => HostKeyStatus::Match,
+        CheckResult::NotFound => HostKeyStatus::Unknown,
+        CheckResult::Mismatch => HostKeyStatus::Mismatch,
+        CheckResult::Failure => HostKeyStatus::Failure,
+    };
+    Ok(HostKeyProbe {
+        fingerprint,
+        status,
+    })
 }
 
 /// Verified and authenticated SSH connection.
@@ -226,35 +316,8 @@ impl SshConnection {
     ///
     /// Returns [`SshError`] on transport, protocol, trust, or auth failure.
     pub fn connect(config: &SshConfig, auth: &SshAuth) -> Result<Self, SshError> {
-        if config.port() == 0 {
-            return Err(SshError::new(
-                SshErrorKind::InvalidInput,
-                "configure SSH",
-                "port must be non-zero",
-            ));
-        }
-
-        let tcp = TcpStream::connect((config.host(), config.port()))
-            .map_err(|error| io_error("connect TCP", &error))?;
-        tcp.set_read_timeout(Some(config.timeout()))
-            .map_err(|error| io_error("set TCP read timeout", &error))?;
-        tcp.set_write_timeout(Some(config.timeout()))
-            .map_err(|error| io_error("set TCP write timeout", &error))?;
-
-        let mut session = Session::new().map_err(|error| {
-            SshError::new(
-                SshErrorKind::Protocol,
-                "create SSH session",
-                error.to_string(),
-            )
-        })?;
-        session.set_tcp_stream(tcp);
-        let timeout_ms = u32::try_from(config.timeout().as_millis()).unwrap_or(DEFAULT_TIMEOUT_MS);
-        session.set_timeout(timeout_ms);
-        session.handshake().map_err(|error| {
-            SshError::new(SshErrorKind::Protocol, "SSH handshake", error.to_string())
-        })?;
-
+        validate_config(config)?;
+        let session = handshake_session(config)?;
         verify_host_key(&session, config)?;
         authenticate(&session, config, auth)?;
         Ok(Self { session })
@@ -267,21 +330,49 @@ impl SshConnection {
     }
 }
 
-fn verify_host_key(session: &Session, config: &SshConfig) -> Result<(), SshError> {
-    let (host_key, _) = session.host_key().ok_or_else(|| {
+fn validate_config(config: &SshConfig) -> Result<(), SshError> {
+    if config.port() == 0 {
+        Err(SshError::new(
+            SshErrorKind::InvalidInput,
+            "configure SSH",
+            "port must be non-zero",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn handshake_session(config: &SshConfig) -> Result<Session, SshError> {
+    let tcp = TcpStream::connect((config.host(), config.port()))
+        .map_err(|error| io_error("connect TCP", &error))?;
+    tcp.set_read_timeout(Some(config.timeout()))
+        .map_err(|error| io_error("set TCP read timeout", &error))?;
+    tcp.set_write_timeout(Some(config.timeout()))
+        .map_err(|error| io_error("set TCP write timeout", &error))?;
+
+    let mut session = Session::new().map_err(|error| {
         SshError::new(
-            SshErrorKind::HostKey,
-            "read SSH host key",
-            "server did not provide a host key",
-        )
-    })?;
-    let mut known_hosts = session.known_hosts().map_err(|error| {
-        SshError::new(
-            SshErrorKind::HostKey,
-            "initialize known_hosts",
+            SshErrorKind::Protocol,
+            "create SSH session",
             error.to_string(),
         )
     })?;
+    session.set_tcp_stream(tcp);
+    let timeout_ms = u32::try_from(config.timeout().as_millis()).unwrap_or(DEFAULT_TIMEOUT_MS);
+    session.set_timeout(timeout_ms);
+    session.handshake().map_err(|error| {
+        SshError::new(SshErrorKind::Protocol, "SSH handshake", error.to_string())
+    })?;
+    Ok(session)
+}
+
+fn load_known_hosts(
+    known_hosts: &mut ssh2::KnownHosts,
+    config: &SshConfig,
+) -> Result<(), SshError> {
+    if !config.known_hosts_file().exists() {
+        return Ok(());
+    }
     known_hosts
         .read_file(config.known_hosts_file(), KnownHostFileKind::OpenSSH)
         .map_err(|error| {
@@ -291,23 +382,63 @@ fn verify_host_key(session: &Session, config: &SshConfig) -> Result<(), SshError
                 format!("{}: {error}", config.known_hosts_file().display()),
             )
         })?;
+    Ok(())
+}
+
+fn host_key_fingerprint(session: &Session) -> Result<String, SshError> {
+    let hash = session.host_key_hash(HashType::Sha256).ok_or_else(|| {
+        SshError::new(
+            SshErrorKind::HostKey,
+            "hash SSH host key",
+            "SHA-256 host-key fingerprint unavailable",
+        )
+    })?;
+    Ok(hash
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":"))
+}
+
+fn verify_host_key(session: &Session, config: &SshConfig) -> Result<(), SshError> {
+    let (host_key, _) = session.host_key().ok_or_else(|| {
+        SshError::new(
+            SshErrorKind::HostKey,
+            "read SSH host key",
+            "server did not provide a host key",
+        )
+    })?;
+    let fingerprint = host_key_fingerprint(session)?;
+    let mut known_hosts = session.known_hosts().map_err(|error| {
+        SshError::new(
+            SshErrorKind::HostKey,
+            "initialize known_hosts",
+            error.to_string(),
+        )
+    })?;
+    load_known_hosts(&mut known_hosts, config)?;
 
     match known_hosts.check_port(config.host(), config.port(), host_key) {
         CheckResult::Match => Ok(()),
         CheckResult::Mismatch => Err(SshError::new(
             SshErrorKind::HostKey,
             "verify SSH host key",
-            "host key does not match known_hosts",
+            format!("host key does not match known_hosts; fingerprint {fingerprint}"),
         )),
+        CheckResult::NotFound
+            if config.trusted_host_fingerprint() == Some(fingerprint.as_str()) =>
+        {
+            Ok(())
+        }
         CheckResult::NotFound => Err(SshError::new(
             SshErrorKind::HostKey,
             "verify SSH host key",
-            "host is not present in known_hosts",
+            format!("host is not present in known_hosts; fingerprint {fingerprint}"),
         )),
         CheckResult::Failure => Err(SshError::new(
             SshErrorKind::HostKey,
             "verify SSH host key",
-            "known_hosts verification failed",
+            format!("known_hosts verification failed; fingerprint {fingerprint}"),
         )),
     }
 }
@@ -315,6 +446,7 @@ fn verify_host_key(session: &Session, config: &SshConfig) -> Result<(), SshError
 fn authenticate(session: &Session, config: &SshConfig, auth: &SshAuth) -> Result<(), SshError> {
     let result = match auth {
         SshAuth::Agent => session.userauth_agent(config.username()),
+        SshAuth::Password(password) => session.userauth_password(config.username(), password),
         SshAuth::PrivateKey(key) => session.userauth_pubkey_file(
             config.username(),
             key.public_key.as_deref(),
@@ -361,6 +493,10 @@ mod tests {
             .with_timeout(Duration::from_secs(45));
         assert_eq!(config.port(), 2222);
         assert_eq!(config.timeout(), Duration::from_secs(45));
+        assert_eq!(config.trusted_host_fingerprint(), None);
+
+        let trusted = config.with_trusted_host_fingerprint("AA:BB");
+        assert_eq!(trusted.trusted_host_fingerprint(), Some("AA:BB"));
         Ok(())
     }
 }

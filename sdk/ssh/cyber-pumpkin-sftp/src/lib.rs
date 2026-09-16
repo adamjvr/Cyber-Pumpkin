@@ -4,8 +4,10 @@ use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind, ReadStream, WriteS
 use cyber_pumpkin_core::{
     BackendCapabilities, BackendId, BackendPath, CapabilitySupport, EntryKind, FileEntry,
 };
-pub use cyber_pumpkin_ssh::{PrivateKeyAuth, SshAuth as SftpAuth};
-use cyber_pumpkin_ssh::{SshConfig, SshConnection, SshError, SshErrorKind};
+pub use cyber_pumpkin_ssh::{HostKeyProbe, HostKeyStatus, PrivateKeyAuth, SshAuth as SftpAuth};
+use cyber_pumpkin_ssh::{
+    SshConfig, SshConnection, SshError, SshErrorKind, probe_host_key as probe_ssh_host_key,
+};
 use ssh2::{ErrorCode, FileStat, Sftp};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -53,6 +55,13 @@ impl SftpConfig {
         self
     }
 
+    /// Allows one exact application-trusted host fingerprint.
+    #[must_use]
+    pub fn with_trusted_host_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.ssh = self.ssh.with_trusted_host_fingerprint(fingerprint);
+        self
+    }
+
     /// Backend id.
     #[must_use]
     pub const fn id(&self) -> &BackendId {
@@ -82,6 +91,15 @@ impl SftpConfig {
     pub fn known_hosts_file(&self) -> &Path {
         self.ssh.known_hosts_file()
     }
+}
+
+/// Probes a server SSH host key before authentication.
+///
+/// # Errors
+///
+/// Returns [`BackendError`] for transport, protocol, or host-key failures.
+pub fn probe_host_key(config: &SftpConfig) -> Result<HostKeyProbe, BackendError> {
+    probe_ssh_host_key(&config.ssh).map_err(|error| map_ssh_error(&error))
 }
 
 /// Connected SFTP backend.

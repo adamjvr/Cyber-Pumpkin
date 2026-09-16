@@ -122,6 +122,7 @@ dependencies = [
  "cyber-pumpkin-history",
  "cyber-pumpkin-local",
  "cyber-pumpkin-operations",
+ "cyber-pumpkin-secrets",
  "cyber-pumpkin-sftp",
  "cyber-pumpkin-sync",
  "cyber-pumpkin-sync-plan",

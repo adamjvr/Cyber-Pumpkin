@@ -1,4 +1,4 @@
-use crate::connection::PaneConnection;
+use crate::connection::{PaneConnection, PaneSftpAuth};
 use adw::prelude::*;
 use cyber_pumpkin_application::PaneSession;
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind, FileEntry};
@@ -167,15 +167,18 @@ impl PaneHandle {
         }
     }
 
-    pub(crate) fn connect_sftp(
+    pub(crate) fn connect_sftp_with_auth(
         &self,
         host: &str,
         username: &str,
         port: u16,
         path: &str,
+        auth: PaneSftpAuth,
+        trusted_fingerprint: Option<String>,
     ) -> Result<(), String> {
         let id = self.backend_id();
-        let connection = PaneConnection::sftp(id.as_str(), host, username, port)?;
+        let connection =
+            PaneConnection::sftp(id.as_str(), host, username, port, auth, trusted_fingerprint)?;
         let target = BackendPath::new(path).map_err(|error| error.to_string())?;
         let loaded = load_directory(&connection, &target)?;
         *self.connection.borrow_mut() = connection;

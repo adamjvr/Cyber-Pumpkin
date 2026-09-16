@@ -7,11 +7,21 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const PROFILE_VERSION: u32 = 1;
+const PROFILE_VERSION: u32 = 2;
+
+/// Saved authentication mode. Secret material is referenced, never embedded.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SavedAuthentication {
+    /// SSH agent.
+    #[default]
+    Agent,
+    /// Password retrieved from the platform secret store.
+    Password,
+    /// Private key path plus optional secret-store passphrase.
+    PrivateKey,
+}
 
 /// A saved, non-secret SFTP connection profile.
-///
-/// Authentication secrets are intentionally excluded from this structure.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SavedConnection {
     /// Stable profile identifier used for replacement and deletion.
@@ -26,10 +36,19 @@ pub struct SavedConnection {
     pub port: u16,
     /// Initial remote path opened after connection.
     pub initial_path: String,
+    /// Authentication mode.
+    #[serde(default)]
+    pub authentication: SavedAuthentication,
+    /// Platform secret-store key for password or private-key passphrase.
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Private-key filesystem path for private-key authentication.
+    #[serde(default)]
+    pub private_key: Option<String>,
 }
 
 impl SavedConnection {
-    /// Creates and validates a saved connection profile.
+    /// Creates and validates a saved connection profile using SSH agent auth.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -45,9 +64,34 @@ impl SavedConnection {
             username: username.into(),
             port,
             initial_path: initial_path.into(),
+            authentication: SavedAuthentication::Agent,
+            secret_key: None,
+            private_key: None,
         };
         profile.validate()?;
         Ok(profile)
+    }
+
+    /// Configures password authentication through a platform secret-store key.
+    #[must_use]
+    pub fn with_password_secret(mut self, key: impl Into<String>) -> Self {
+        self.authentication = SavedAuthentication::Password;
+        self.secret_key = Some(key.into());
+        self.private_key = None;
+        self
+    }
+
+    /// Configures private-key authentication.
+    #[must_use]
+    pub fn with_private_key(
+        mut self,
+        private_key: impl Into<String>,
+        passphrase_secret: Option<String>,
+    ) -> Self {
+        self.authentication = SavedAuthentication::PrivateKey;
+        self.private_key = Some(private_key.into());
+        self.secret_key = passphrase_secret;
+        self
     }
 
     /// Validates profile fields required for a usable connection.
@@ -69,6 +113,17 @@ impl SavedConnection {
         }
         if self.initial_path.is_empty() {
             return Err("connection path must not be empty".to_owned());
+        }
+        match self.authentication {
+            SavedAuthentication::Password if self.secret_key.is_none() => {
+                return Err("password profile is missing secret-store key".to_owned());
+            }
+            SavedAuthentication::PrivateKey if self.private_key.is_none() => {
+                return Err("private-key profile is missing key path".to_owned());
+            }
+            SavedAuthentication::Agent
+            | SavedAuthentication::Password
+            | SavedAuthentication::PrivateKey => {}
         }
         Ok(())
     }
@@ -106,6 +161,7 @@ impl ConnectionProfiles {
         }
         self.profiles
             .sort_by_key(|profile| profile.name.to_lowercase());
+        self.version = PROFILE_VERSION;
     }
 
     /// Removes a profile by stable id and reports whether one existed.
@@ -188,7 +244,7 @@ pub fn application_support_directory() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionProfiles, SavedConnection};
+    use super::{ConnectionProfiles, SavedAuthentication, SavedConnection};
 
     fn profile(id: &str, name: &str) -> Result<SavedConnection, String> {
         SavedConnection::new(id, name, "example.test", "adam", 22, "/")
@@ -210,6 +266,18 @@ mod tests {
         profiles.upsert(profile("studio", "Studio")?);
         assert!(profiles.remove("studio"));
         assert!(!profiles.remove("studio"));
+        Ok(())
+    }
+
+    #[test]
+    fn password_profile_contains_reference_not_secret() -> Result<(), String> {
+        let profile =
+            profile("studio", "Studio")?.with_password_secret("connection:studio:password");
+        assert_eq!(profile.authentication, SavedAuthentication::Password);
+        assert_eq!(
+            profile.secret_key.as_deref(),
+            Some("connection:studio:password")
+        );
         Ok(())
     }
 }

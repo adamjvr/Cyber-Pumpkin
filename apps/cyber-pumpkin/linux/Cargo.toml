@@ -16,6 +16,7 @@ cyber-pumpkin-decisions = { version = "0.1.0", path = "../../../sdk/decisions/cy
 cyber-pumpkin-history = { version = "0.1.0", path = "../../../sdk/history/cyber-pumpkin-history" }
 cyber-pumpkin-local = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-local" }
 cyber-pumpkin-sftp = { version = "0.1.0", path = "../../../sdk/ssh/cyber-pumpkin-sftp" }
+cyber-pumpkin-secrets = { version = "0.1.0", path = "../../../sdk/security/cyber-pumpkin-secrets" }
 cyber-pumpkin-operations = { version = "0.1.0", path = "../../../sdk/operations/cyber-pumpkin-operations" }
 cyber-pumpkin-sync-plan = { version = "0.1.0", path = "../../../sdk/sync/cyber-pumpkin-sync-plan" }
 cyber-pumpkin-sync = { version = "0.1.0", path = "../../../sdk/sync/cyber-pumpkin-sync" }

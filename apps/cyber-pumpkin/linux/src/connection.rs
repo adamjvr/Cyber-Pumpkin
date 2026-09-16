@@ -1,7 +1,18 @@
 use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::BackendId;
 use cyber_pumpkin_local::LocalBackend;
-use cyber_pumpkin_sftp::{SftpAuth, SftpBackend, SftpConfig};
+use cyber_pumpkin_sftp::{PrivateKeyAuth, SftpAuth, SftpBackend, SftpConfig};
+
+/// Authentication held only in the live pane connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PaneSftpAuth {
+    Agent,
+    Password(String),
+    PrivateKey {
+        private_key: String,
+        passphrase: Option<String>,
+    },
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PaneConnection {
@@ -13,6 +24,8 @@ pub(crate) enum PaneConnection {
         host: String,
         username: String,
         port: u16,
+        auth: PaneSftpAuth,
+        trusted_fingerprint: Option<String>,
     },
 }
 
@@ -23,7 +36,14 @@ impl PaneConnection {
         })
     }
 
-    pub(crate) fn sftp(id: &str, host: &str, username: &str, port: u16) -> Result<Self, String> {
+    pub(crate) fn sftp(
+        id: &str,
+        host: &str,
+        username: &str,
+        port: u16,
+        auth: PaneSftpAuth,
+        trusted_fingerprint: Option<String>,
+    ) -> Result<Self, String> {
         if host.trim().is_empty() {
             return Err("SFTP host must not be blank.".to_owned());
         }
@@ -38,6 +58,8 @@ impl PaneConnection {
             host: host.trim().to_owned(),
             username: username.trim().to_owned(),
             port,
+            auth,
+            trusted_fingerprint,
         })
     }
 
@@ -67,12 +89,33 @@ impl PaneConnection {
                 host,
                 username,
                 port,
+                auth,
+                trusted_fingerprint,
             } => {
-                let config = SftpConfig::new(id.clone(), host, username)
+                let mut config = SftpConfig::new(id.clone(), host, username)
                     .map_err(|error| error.to_string())?
                     .with_port(*port);
-                let backend = SftpBackend::connect(&config, &SftpAuth::Agent)
-                    .map_err(|error| error.to_string())?;
+                if let Some(fingerprint) = trusted_fingerprint {
+                    config = config.with_trusted_host_fingerprint(fingerprint.clone());
+                }
+
+                let auth = match auth {
+                    PaneSftpAuth::Agent => SftpAuth::Agent,
+                    PaneSftpAuth::Password(password) => SftpAuth::Password(password.clone()),
+                    PaneSftpAuth::PrivateKey {
+                        private_key,
+                        passphrase,
+                    } => {
+                        let mut key = PrivateKeyAuth::new(private_key);
+                        if let Some(passphrase) = passphrase {
+                            key = key.with_passphrase(passphrase.clone());
+                        }
+                        SftpAuth::PrivateKey(Box::new(key))
+                    }
+                };
+
+                let backend =
+                    SftpBackend::connect(&config, &auth).map_err(|error| error.to_string())?;
                 Ok(Box::new(backend))
             }
         }

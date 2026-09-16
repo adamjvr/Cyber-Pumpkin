@@ -9,7 +9,8 @@ pub use preferences::{
     TransferPreferences, default_preferences_path,
 };
 pub use profiles::{
-    ConnectionProfiles, SavedConnection, application_support_directory, default_profiles_path,
+    ConnectionProfiles, SavedAuthentication, SavedConnection, application_support_directory,
+    default_profiles_path,
 };
 pub use trust::{TrustedHost, TrustedHosts, default_trusted_hosts_path};
 

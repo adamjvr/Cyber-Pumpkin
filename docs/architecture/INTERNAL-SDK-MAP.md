@@ -47,3 +47,5 @@ Rust libraries own behavior.
 - provider crates such as FTP only when actually implemented
 
 Pass 13 rule: native shells render decisions; shared decision and sync libraries own allowed choices and conflict semantics.
+
+Pass 14B rule: saved profiles contain only auth mode, paths, and secret-store references; secret values never enter profile JSON.
