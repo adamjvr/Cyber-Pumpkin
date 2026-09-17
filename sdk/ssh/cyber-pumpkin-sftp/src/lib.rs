@@ -290,6 +290,38 @@ impl Backend for SftpBackend {
                 .map_err(|error| Self::ssh_error("remove SFTP file", path, &error))
         }
     }
+
+    fn unix_mode(&self, path: &BackendPath) -> Result<Option<u32>, BackendError> {
+        let stat = self
+            .sftp
+            .lstat(Self::path(path))
+            .map_err(|error| Self::ssh_error("read SFTP Unix permissions", path, &error))?;
+        Ok(stat.perm.map(|mode| mode & 0o7777))
+    }
+
+    fn set_unix_mode(&self, path: &BackendPath, mode: u32) -> Result<(), BackendError> {
+        if mode > 0o7777 {
+            return Err(BackendError::new(
+                ErrorKind::InvalidInput,
+                "set SFTP Unix permissions",
+                Some(path.clone()),
+                format!("mode {mode:#o} exceeds 0o7777"),
+            ));
+        }
+        self.sftp
+            .setstat(
+                Self::path(path),
+                FileStat {
+                    size: None,
+                    uid: None,
+                    gid: None,
+                    perm: Some(mode),
+                    atime: None,
+                    mtime: None,
+                },
+            )
+            .map_err(|error| Self::ssh_error("set SFTP Unix permissions", path, &error))
+    }
 }
 
 fn map_ssh_error(error: &SshError) -> BackendError {

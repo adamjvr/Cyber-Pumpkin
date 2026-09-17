@@ -6,6 +6,7 @@ use cyber_pumpkin_core::{
 };
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// Backend that exposes the host filesystem through the common I/O contract.
@@ -170,6 +171,26 @@ impl Backend for LocalBackend {
                 .map_err(|error| Self::io_error("remove file", path, &error))
         }
     }
+
+    fn unix_mode(&self, path: &BackendPath) -> Result<Option<u32>, BackendError> {
+        let metadata = fs::symlink_metadata(Self::native_path(path))
+            .map_err(|error| Self::io_error("read Unix permissions", path, &error))?;
+        Ok(Some(metadata.permissions().mode() & 0o7777))
+    }
+
+    fn set_unix_mode(&self, path: &BackendPath, mode: u32) -> Result<(), BackendError> {
+        if mode > 0o7777 {
+            return Err(BackendError::new(
+                ErrorKind::InvalidInput,
+                "set Unix permissions",
+                Some(path.clone()),
+                format!("mode {mode:#o} exceeds 0o7777"),
+            ));
+        }
+        let permissions = fs::Permissions::from_mode(mode);
+        fs::set_permissions(Self::native_path(path), permissions)
+            .map_err(|error| Self::io_error("set Unix permissions", path, &error))
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +217,20 @@ mod tests {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "test path must be UTF-8")
         })?;
         Ok(BackendPath::new(text)?)
+    }
+
+    #[test]
+    fn reads_and_writes_unix_permissions() -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_directory();
+        fs::create_dir(&root)?;
+        let file = root.join("mode.txt");
+        fs::write(&file, b"pumpkin")?;
+        let backend = LocalBackend::new(BackendId::new("local")?);
+        let path = backend_path(&file)?;
+        backend.set_unix_mode(&path, 0o640)?;
+        assert_eq!(backend.unix_mode(&path)?, Some(0o640));
+        fs::remove_dir_all(&root)?;
+        Ok(())
     }
 
     #[test]

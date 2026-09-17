@@ -163,4 +163,27 @@ pub trait Backend {
     ///
     /// Returns [`BackendError`] when the entry cannot be removed.
     fn remove(&self, path: &BackendPath) -> Result<(), BackendError>;
+
+    /// Returns a POSIX-compatible mode when the backend exposes one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] when metadata lookup fails.
+    fn unix_mode(&self, _path: &BackendPath) -> Result<Option<u32>, BackendError> {
+        Ok(None)
+    }
+
+    /// Updates the low twelve POSIX permission/mode bits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] when the backend rejects or cannot apply the mode.
+    fn set_unix_mode(&self, path: &BackendPath, _mode: u32) -> Result<(), BackendError> {
+        Err(BackendError::new(
+            ErrorKind::InvalidInput,
+            "set Unix permissions",
+            Some(path.clone()),
+            "backend does not support Unix permission writes",
+        ))
+    }
 }

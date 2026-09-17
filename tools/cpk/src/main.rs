@@ -30,6 +30,8 @@ USAGE:
   cpk about
   cpk local-ls <path>
   cpk local-stat <path>
+  cpk local-mode <path>
+  cpk local-chmod <octal-mode> <path>
   cpk local-copy <source> <destination>
   cpk local-copy-safe <source> <destination>
   cpk local-copy-tree-safe <source> <destination>
@@ -77,6 +79,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         Some("local-ls") => local_ls_command(&mut args)?,
         Some("local-stat") => local_stat_command(&mut args)?,
+        Some("local-mode") => local_mode_command(&mut args)?,
+        Some("local-chmod") => local_chmod_command(&mut args)?,
         Some("local-copy") => local_copy_command(&mut args, false)?,
         Some("local-copy-safe") => local_copy_command(&mut args, true)?,
         Some("local-copy-tree-safe") => local_copy_tree_command(&mut args)?,
@@ -125,6 +129,30 @@ fn local_stat_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box
     let path = next_arg(args, "path")?;
     ensure_finished(args)?;
     local_stat(&path)
+}
+
+fn local_mode_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let path = next_arg(args, "path")?;
+    ensure_finished(args)?;
+    let backend = local_backend()?;
+    let path = BackendPath::new(path)?;
+    match backend.unix_mode(&path)? {
+        Some(mode) => println!("{mode:04o}"),
+        None => println!("unsupported"),
+    }
+    Ok(())
+}
+
+fn local_chmod_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let mode_text = next_arg(args, "octal-mode")?;
+    let path = next_arg(args, "path")?;
+    ensure_finished(args)?;
+    let mode = u32::from_str_radix(mode_text.trim_start_matches("0o"), 8)?;
+    let backend = local_backend()?;
+    let path = BackendPath::new(path)?;
+    backend.set_unix_mode(&path, mode)?;
+    println!("{mode:04o} {}", path.as_str());
+    Ok(())
 }
 
 fn local_copy_command(

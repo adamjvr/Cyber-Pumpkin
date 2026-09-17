@@ -5,10 +5,15 @@
 //! without re-planning or silently changing the requested work.
 
 use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
-use cyber_pumpkin_core::{BackendPath, EntryKind};
-use cyber_pumpkin_reliability::{ReliabilityError, ReliableTransferOutcome, execute_file_reliable};
+use cyber_pumpkin_core::BackendPath;
+use cyber_pumpkin_reliability::{
+    ReliabilityError, ReliableTransferOutcome, ReliableTreeOutcome, execute_file_reliable,
+    execute_tree_reliable,
+};
 use cyber_pumpkin_sync_plan::{SyncAction, SyncActionKind, SyncPlan};
-use cyber_pumpkin_transfer::{CancellationToken, Endpoint, ExecutionError, TransferId};
+use cyber_pumpkin_transfer::{
+    CancellationToken, Endpoint, ExecutionError, TransferId, TransferSpec,
+};
 use std::fmt;
 
 /// Snapshot emitted while executing a synchronization plan.
@@ -420,51 +425,60 @@ fn replace_conflict<F>(
 where
     F: FnMut(SyncExecutionProgress),
 {
-    let source_entry = source.stat(required_source(action)?)?;
-    let removed = remove_tree_if_present(destination, required_destination(action)?)?;
-    report.entries_removed = report.entries_removed.saturating_add(removed);
-
-    match source_entry.kind {
-        EntryKind::Directory => {
-            destination.create_dir(required_destination(action)?)?;
-            report.directories_created = report.directories_created.saturating_add(1);
-            Ok(ActionOutcome::Completed)
-        }
-        EntryKind::File => execute_copy(
-            action,
-            source,
-            destination,
-            cancellation,
-            completed_actions,
-            total_actions,
-            report,
-            on_progress,
-        ),
-        EntryKind::Symlink | EntryKind::Other => {
-            report.skipped = report.skipped.saturating_add(1);
-            Ok(ActionOutcome::Completed)
-        }
-    }
-}
-
-fn remove_tree_if_present(
-    backend: &dyn Backend,
-    path: &BackendPath,
-) -> Result<u64, SyncExecutionError> {
-    let entry = match backend.stat(path) {
-        Ok(entry) => entry,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error.into()),
+    let source_path = required_source(action)?.clone();
+    let destination_path = required_destination(action)?.clone();
+    let transfer_id =
+        TransferId::new(completed_actions.saturating_add(1)).map_err(ExecutionError::from)?;
+    let spec = TransferSpec {
+        source: Endpoint {
+            backend: source.id().clone(),
+            path: source_path,
+        },
+        destination: Endpoint {
+            backend: destination.id().clone(),
+            path: destination_path,
+        },
     };
-
-    let mut removed = 0_u64;
-    if entry.kind == EntryKind::Directory {
-        for child in backend.list(path)? {
-            removed = removed.saturating_add(remove_tree_if_present(backend, &child.path)?);
+    let outcome = execute_tree_reliable(
+        transfer_id,
+        &spec,
+        source,
+        destination,
+        cancellation,
+        true,
+        |progress| {
+            on_progress(SyncExecutionProgress {
+                completed_actions,
+                total_actions,
+                current_path: action.relative_path.clone(),
+                current_bytes: progress.bytes_copied(),
+                current_total_bytes: progress.total_bytes(),
+            });
+        },
+    )?;
+    match outcome {
+        ReliableTreeOutcome::Completed(tree_report) => {
+            report.files_copied = report
+                .files_copied
+                .saturating_add(tree_report.transfer.files_copied());
+            report.directories_created = report
+                .directories_created
+                .saturating_add(tree_report.transfer.directories_created());
+            report.bytes_copied = report
+                .bytes_copied
+                .saturating_add(tree_report.transfer.bytes_copied());
+            if tree_report.replaced_existing {
+                report.entries_removed = report.entries_removed.saturating_add(1);
+            }
+            Ok(ActionOutcome::Completed)
+        }
+        ReliableTreeOutcome::Cancelled(tree_report) => {
+            report.bytes_copied = report
+                .bytes_copied
+                .saturating_add(tree_report.bytes_copied());
+            Ok(ActionOutcome::Cancelled)
         }
     }
-    backend.remove(path)?;
-    Ok(removed.saturating_add(1))
 }
 
 fn remove_if_present(
