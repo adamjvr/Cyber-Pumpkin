@@ -115,6 +115,74 @@ pub enum RecoveryAction {
     Noop,
 }
 
+/// Aggregate startup recovery result.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecoverySweepReport {
+    /// Entries examined successfully.
+    pub entries_processed: u64,
+    /// Entries that restored an original destination.
+    pub restored: u64,
+    /// Entries that cleaned stage/backup sidecars.
+    pub cleaned: u64,
+    /// Entries requiring no backend mutation.
+    pub noop: u64,
+}
+
+/// Failure while loading, applying, or persisting a recovery sweep.
+#[derive(Debug)]
+pub enum RecoverySweepError {
+    /// Journal I/O or decoding failure.
+    Io(io::Error),
+    /// Backend recovery action failed.
+    Backend(BackendError),
+}
+
+impl std::fmt::Display for RecoverySweepError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "recovery journal I/O failed: {error}"),
+            Self::Backend(error) => write!(formatter, "recovery backend action failed: {error}"),
+        }
+    }
+}
+impl std::error::Error for RecoverySweepError {}
+impl From<io::Error> for RecoverySweepError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+impl From<BackendError> for RecoverySweepError {
+    fn from(value: BackendError) -> Self {
+        Self::Backend(value)
+    }
+}
+
+/// Loads and drains a recovery journal one entry at a time.
+///
+/// # Errors
+///
+/// Returns [`RecoverySweepError`] when journal I/O or backend recovery fails.
+pub fn recover_journal(
+    backend: &dyn Backend,
+    path: &Path,
+) -> Result<RecoverySweepReport, RecoverySweepError> {
+    let mut journal = RecoveryJournal::load(path)?;
+    let entries = journal.entries.clone();
+    let mut report = RecoverySweepReport::default();
+    for entry in entries {
+        let action = recover_entry(backend, &entry)?;
+        report.entries_processed = report.entries_processed.saturating_add(1);
+        match action {
+            RecoveryAction::Restored => report.restored = report.restored.saturating_add(1),
+            RecoveryAction::Cleaned => report.cleaned = report.cleaned.saturating_add(1),
+            RecoveryAction::Noop => report.noop = report.noop.saturating_add(1),
+        }
+        journal.remove(entry.operation_id);
+        journal.save(path)?;
+    }
+    Ok(report)
+}
+
 /// Recovers one interrupted replacement conservatively.
 ///
 /// # Errors

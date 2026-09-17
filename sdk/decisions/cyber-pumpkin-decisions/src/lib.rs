@@ -48,6 +48,48 @@ pub enum DecisionKind {
     Authentication,
 }
 
+/// Transfer direction used to scope remembered decisions.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum DecisionDirection {
+    /// Source is local and destination is remote.
+    Upload,
+    /// Source is remote and destination is local.
+    Download,
+    /// Both endpoints are local.
+    Local,
+    /// Direction is not meaningful for this request.
+    Neutral,
+}
+
+/// Matching context for a remembered decision.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DecisionContext {
+    /// Broad request category.
+    pub kind: DecisionKind,
+    /// Operation direction when relevant.
+    pub direction: DecisionDirection,
+    /// Source backend family or stable identifier.
+    pub source_backend: Option<String>,
+    /// Destination backend family or stable identifier.
+    pub destination_backend: Option<String>,
+    /// Optional object/conflict scope supplied by the caller.
+    pub object_scope: Option<String>,
+}
+
+impl DecisionContext {
+    /// Creates a backwards-compatible context scoped only by decision kind.
+    #[must_use]
+    pub const fn kind_only(kind: DecisionKind) -> Self {
+        Self {
+            kind,
+            direction: DecisionDirection::Neutral,
+            source_backend: None,
+            destination_backend: None,
+            object_scope: None,
+        }
+    }
+}
+
 /// Action selected by the user or a remembered policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecisionChoice {
@@ -85,6 +127,8 @@ pub struct DecisionRequest {
     pub id: DecisionId,
     /// Decision category.
     pub kind: DecisionKind,
+    /// Exact matching context used for remembered policy.
+    pub context: DecisionContext,
     /// Short user-facing subject.
     pub subject: String,
     /// Detailed context shown by a native shell.
@@ -148,7 +192,7 @@ impl std::error::Error for DecisionError {}
 pub struct DecisionCenter {
     next_id: u64,
     pending: BTreeMap<DecisionId, DecisionRequest>,
-    remembered: BTreeMap<DecisionKind, DecisionChoice>,
+    remembered: BTreeMap<DecisionContext, DecisionChoice>,
 }
 
 impl DecisionCenter {
@@ -162,10 +206,16 @@ impl DecisionCenter {
         }
     }
 
-    /// Returns a remembered answer for this decision kind.
+    /// Returns a remembered answer for this exact decision context.
+    #[must_use]
+    pub fn remembered_context(&self, context: &DecisionContext) -> Option<DecisionChoice> {
+        self.remembered.get(context).copied()
+    }
+
+    /// Returns a backwards-compatible kind-only remembered answer.
     #[must_use]
     pub fn remembered(&self, kind: DecisionKind) -> Option<DecisionChoice> {
-        self.remembered.get(&kind).copied()
+        self.remembered_context(&DecisionContext::kind_only(kind))
     }
 
     /// Emits a decision request unless a matching session answer exists.
@@ -184,14 +234,27 @@ impl DecisionCenter {
         detail: impl Into<String>,
         allowed: Vec<DecisionChoice>,
     ) -> Result<(DecisionId, Option<DecisionResolution>), DecisionError> {
+        self.request_with_context(DecisionContext::kind_only(kind), subject, detail, allowed)
+    }
+
+    /// Emits a decision request with an exact matching context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecisionError::NoChoices`] when no choices are supplied.
+    pub fn request_with_context(
+        &mut self,
+        context: DecisionContext,
+        subject: impl Into<String>,
+        detail: impl Into<String>,
+        allowed: Vec<DecisionChoice>,
+    ) -> Result<(DecisionId, Option<DecisionResolution>), DecisionError> {
         if allowed.is_empty() {
             return Err(DecisionError::NoChoices);
         }
-
         let id = DecisionId::new(self.next_id)?;
         self.next_id = self.next_id.saturating_add(1);
-
-        if let Some(choice) = self.remembered(kind)
+        if let Some(choice) = self.remembered_context(&context)
             && allowed.contains(&choice)
         {
             return Ok((
@@ -203,12 +266,13 @@ impl DecisionCenter {
                 }),
             ));
         }
-
+        let kind = context.kind;
         self.pending.insert(
             id,
             DecisionRequest {
                 id,
                 kind,
+                context,
                 subject: subject.into(),
                 detail: detail.into(),
                 allowed,
@@ -238,10 +302,10 @@ impl DecisionCenter {
         if !request.allowed.contains(&choice) {
             return Err(DecisionError::ChoiceNotAllowed { id, choice });
         }
-        let kind = request.kind;
+        let context = request.context.clone();
         self.pending.remove(&id);
         if scope == DecisionScope::AllMatching {
-            self.remembered.insert(kind, choice);
+            self.remembered.insert(context, choice);
         }
         Ok(DecisionResolution { id, choice, scope })
     }

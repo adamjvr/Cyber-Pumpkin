@@ -33,6 +33,8 @@ pub struct RemoteEditSession {
     pub local: Endpoint,
     /// Initial or last-uploaded local stamp.
     pub baseline: FileStamp,
+    /// Remote stamp observed at download or after our last successful upload.
+    pub remote_baseline: FileStamp,
 }
 
 /// Remote-edit failure.
@@ -52,6 +54,8 @@ pub enum RemoteEditError {
     Upload(String),
     /// Upload was cancelled.
     UploadCancelled,
+    /// Remote content changed after this edit session downloaded its baseline.
+    RemoteChanged,
     /// Workspace path could not be represented.
     InvalidWorkspacePath,
 }
@@ -68,6 +72,9 @@ impl fmt::Display for RemoteEditError {
             Self::DownloadCancelled => formatter.write_str("remote-edit download was cancelled"),
             Self::Upload(error) => write!(formatter, "remote-edit upload failed: {error}"),
             Self::UploadCancelled => formatter.write_str("remote-edit upload was cancelled"),
+            Self::RemoteChanged => formatter.write_str(
+                "remote file changed since this edit session downloaded it; upload refused",
+            ),
             Self::InvalidWorkspacePath => {
                 formatter.write_str("remote-edit workspace path is invalid")
             }
@@ -112,6 +119,7 @@ pub fn create_session(
         remote,
         local,
         baseline: FileStamp::default(),
+        remote_baseline: FileStamp::default(),
     })
 }
 
@@ -152,6 +160,7 @@ pub fn download_initial(
     match outcome {
         CopyRuntimeOutcome::Completed(_) => {
             session.baseline = stamp(local_backend, &session.local.path)?;
+            session.remote_baseline = stamp(remote_backend, &session.remote.path)?;
             Ok(())
         }
         CopyRuntimeOutcome::Skipped { .. } => Err(RemoteEditError::DownloadSkipped),
@@ -186,6 +195,9 @@ pub fn upload_changed(
     if !local_changed(session, local_backend)? {
         return Ok(false);
     }
+    if stamp(remote_backend, &session.remote.path)? != session.remote_baseline {
+        return Err(RemoteEditError::RemoteChanged);
+    }
 
     match execute_file_reliable(
         session.id,
@@ -200,6 +212,7 @@ pub fn upload_changed(
     {
         ReliableTransferOutcome::Completed(_) => {
             session.baseline = stamp(local_backend, &session.local.path)?;
+            session.remote_baseline = stamp(remote_backend, &session.remote.path)?;
             Ok(true)
         }
         ReliableTransferOutcome::Cancelled { .. } => Err(RemoteEditError::UploadCancelled),
