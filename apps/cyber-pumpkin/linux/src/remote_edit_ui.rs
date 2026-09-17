@@ -6,13 +6,21 @@ use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_remote_edit::RemoteEditSession;
 use cyber_pumpkin_remote_edit::{create_session, download_initial, local_changed, upload_changed};
 use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId};
+use std::collections::BTreeMap;
 use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 static NEXT_REMOTE_EDIT_ID: AtomicU64 = AtomicU64::new(1_000_000);
-static REMOTE_EDIT_SHUTDOWN: OnceLock<CancellationToken> = OnceLock::new();
+static ACTIVE_REMOTE_EDITS: OnceLock<Mutex<BTreeMap<u64, ActiveRemoteEdit>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct ActiveRemoteEdit {
+    id: u64,
+    path: String,
+    cancellation: CancellationToken,
+}
 
 pub(crate) fn edit_selected_remote_file(pane: &PaneHandle) {
     let connection = pane.connection();
@@ -100,16 +108,131 @@ pub(crate) fn edit_selected_remote_file(pane: &PaneHandle) {
     start_remote_edit_watcher(connection, local_id, session);
 }
 
-fn remote_edit_shutdown_token() -> CancellationToken {
-    REMOTE_EDIT_SHUTDOWN
-        .get_or_init(CancellationToken::new)
-        .clone()
+fn remote_edit_registry() -> &'static Mutex<BTreeMap<u64, ActiveRemoteEdit>> {
+    ACTIVE_REMOTE_EDITS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn remote_edit_registry_guard() -> MutexGuard<'static, BTreeMap<u64, ActiveRemoteEdit>> {
+    match remote_edit_registry().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn register_remote_edit(id: u64, path: &str) -> CancellationToken {
+    let cancellation = CancellationToken::new();
+    remote_edit_registry_guard().insert(
+        id,
+        ActiveRemoteEdit {
+            id,
+            path: path.to_owned(),
+            cancellation: cancellation.clone(),
+        },
+    );
+    cancellation
+}
+
+fn unregister_remote_edit(id: u64) {
+    remote_edit_registry_guard().remove(&id);
+}
+
+fn stop_remote_edit(id: u64) -> bool {
+    let Some(active) = remote_edit_registry_guard().remove(&id) else {
+        return false;
+    };
+    active.cancellation.cancel();
+    true
+}
+
+fn stop_all_remote_edits() -> usize {
+    let mut sessions = remote_edit_registry_guard();
+    let count = sessions.len();
+    for session in sessions.values() {
+        session.cancellation.cancel();
+    }
+    sessions.clear();
+    count
 }
 
 pub(crate) fn shutdown_remote_edits() {
-    if let Some(cancellation) = REMOTE_EDIT_SHUTDOWN.get() {
-        cancellation.cancel();
+    let _stopped = stop_all_remote_edits();
+}
+
+pub(crate) fn show_remote_edit_sessions(app: &adw::Application) {
+    use gtk::prelude::*;
+
+    let sessions = remote_edit_registry_guard()
+        .values()
+        .map(|session| (session.id, session.path.clone()))
+        .collect::<Vec<_>>();
+
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title("Remote Edit Sessions")
+        .default_width(640)
+        .default_height(320)
+        .build();
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    root.set_margin_top(14);
+    root.set_margin_bottom(14);
+    root.set_margin_start(14);
+    root.set_margin_end(14);
+
+    let title = gtk::Label::new(Some("Remote Edit Sessions"));
+    title.set_xalign(0.0);
+    title.add_css_class("title-3");
+    root.append(&title);
+
+    if sessions.is_empty() {
+        let empty = gtk::Label::new(Some("No active remote-edit watchers."));
+        empty.set_xalign(0.0);
+        empty.add_css_class("dim-label");
+        root.append(&empty);
+    } else {
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        for (id, path) in sessions {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let label = gtk::Label::new(Some(&format!("#{id}  {path}")));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.set_wrap(true);
+            let stop = gtk::Button::with_label("Stop");
+            stop.add_css_class("destructive-action");
+            stop.connect_clicked(move |button| {
+                if stop_remote_edit(id) {
+                    button.set_label("Stopping…");
+                    button.set_sensitive(false);
+                } else {
+                    button.set_label("Stopped");
+                    button.set_sensitive(false);
+                }
+            });
+            row.append(&label);
+            row.append(&stop);
+            list.append(&row);
+        }
+        root.append(&list);
+
+        let stop_all = gtk::Button::with_label("Stop All Remote Edits");
+        stop_all.add_css_class("destructive-action");
+        stop_all.connect_clicked(|button| {
+            let count = stop_all_remote_edits();
+            button.set_label(&format!("Stopped {count}"));
+            button.set_sensitive(false);
+        });
+        root.append(&stop_all);
     }
+
+    let note = gtk::Label::builder()
+        .label("Stopping a session cancels its watcher and prevents further automatic uploads. The local working copy is left on disk.")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(vec!["dim-label".to_owned()])
+        .build();
+    root.append(&note);
+
+    window.set_child(Some(&root));
+    window.present();
 }
 
 fn start_remote_edit_watcher(
@@ -117,7 +240,7 @@ fn start_remote_edit_watcher(
     local_id: BackendId,
     session: RemoteEditSession,
 ) {
-    let cancellation = remote_edit_shutdown_token();
+    let cancellation = register_remote_edit(session.id.get(), session.remote.path.as_str());
     let _watcher = std::thread::spawn(move || {
         let local_backend = LocalBackend::new(local_id);
         let mut session = session;
@@ -170,6 +293,7 @@ fn start_remote_edit_watcher(
                 }
             }
         }
+        unregister_remote_edit(session.id.get());
     });
 }
 

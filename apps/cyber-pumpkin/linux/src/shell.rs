@@ -94,7 +94,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
         let pane = left.clone();
         left.set_selection_observer(move |entry, backend| {
             if active.get() == PaneSide::Left {
-                inspector.update(entry, &backend);
+                inspector.update(entry, &backend, pane.connection());
                 apply_mode_chrome(&title, &search, &pane, workspace.mode());
             }
         });
@@ -108,7 +108,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
         let pane = right.clone();
         right.set_selection_observer(move |entry, backend| {
             if active.get() == PaneSide::Right {
-                inspector.update(entry, &backend);
+                inspector.update(entry, &backend, pane.connection());
                 apply_mode_chrome(&title, &search, &pane, workspace.mode());
             }
         });
@@ -363,6 +363,10 @@ fn build_menu_model() -> gio::Menu {
     let transfer = gio::Menu::new();
     transfer.append(Some("Copy to Other Pane"), Some("app.copy-other"));
     transfer.append(Some("Edit Remote File"), Some("app.remote-edit"));
+    transfer.append(
+        Some("Remote Edit Sessions…"),
+        Some("app.remote-edit-sessions"),
+    );
     transfer.append(Some("Sync Files"), Some("app.sync"));
     transfer.append(Some("Activity"), Some("app.activity"));
     transfer.append(Some("Clear Activity"), Some("app.clear-activity"));
@@ -402,6 +406,10 @@ fn install_actions(app: &adw::Application, context: &ActionContext) {
     install_go_actions(app, context);
     install_transfer_action(app, context);
 
+    install_simple_action(app, "remote-edit-sessions", {
+        let app = app.clone();
+        move || remote_edit_ui::show_remote_edit_sessions(&app)
+    });
     install_simple_action(app, "preferences", {
         let app = app.clone();
         move || preferences_ui::show_preferences(&app)
