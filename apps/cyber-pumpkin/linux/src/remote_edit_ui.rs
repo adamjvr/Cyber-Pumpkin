@@ -7,10 +7,12 @@ use cyber_pumpkin_remote_edit::RemoteEditSession;
 use cyber_pumpkin_remote_edit::{create_session, download_initial, local_changed, upload_changed};
 use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 static NEXT_REMOTE_EDIT_ID: AtomicU64 = AtomicU64::new(1_000_000);
+static REMOTE_EDIT_SHUTDOWN: OnceLock<CancellationToken> = OnceLock::new();
 
 pub(crate) fn edit_selected_remote_file(pane: &PaneHandle) {
     let connection = pane.connection();
@@ -98,16 +100,35 @@ pub(crate) fn edit_selected_remote_file(pane: &PaneHandle) {
     start_remote_edit_watcher(connection, local_id, session);
 }
 
+fn remote_edit_shutdown_token() -> CancellationToken {
+    REMOTE_EDIT_SHUTDOWN
+        .get_or_init(CancellationToken::new)
+        .clone()
+}
+
+pub(crate) fn shutdown_remote_edits() {
+    if let Some(cancellation) = REMOTE_EDIT_SHUTDOWN.get() {
+        cancellation.cancel();
+    }
+}
+
 fn start_remote_edit_watcher(
     connection: PaneConnection,
     local_id: BackendId,
     session: RemoteEditSession,
 ) {
+    let cancellation = remote_edit_shutdown_token();
     let _watcher = std::thread::spawn(move || {
         let local_backend = LocalBackend::new(local_id);
         let mut session = session;
         loop {
+            if cancellation.is_cancelled() {
+                break;
+            }
             std::thread::sleep(Duration::from_secs(1));
+            if cancellation.is_cancelled() {
+                break;
+            }
 
             match local_changed(&session, &local_backend) {
                 Ok(false) => continue,
@@ -119,6 +140,9 @@ fn start_remote_edit_watcher(
             }
 
             std::thread::sleep(Duration::from_secs(1));
+            if cancellation.is_cancelled() {
+                break;
+            }
 
             let remote_backend = match connection.connect_backend() {
                 Ok(backend) => backend,
@@ -132,13 +156,16 @@ fn start_remote_edit_watcher(
                 &mut session,
                 &local_backend,
                 remote_backend.as_ref(),
-                &CancellationToken::new(),
+                &cancellation,
             ) {
                 Ok(true) => {
                     eprintln!("remote-edit uploaded {}", session.remote.path.as_str());
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    if cancellation.is_cancelled() {
+                        break;
+                    }
                     eprintln!("remote-edit upload failed: {error}");
                 }
             }

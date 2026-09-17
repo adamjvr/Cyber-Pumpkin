@@ -8,12 +8,14 @@
 
 use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
 use cyber_pumpkin_core::{BackendPath, CapabilitySupport, EntryKind};
+use cyber_pumpkin_recovery::{RecoveryEntry, RecoveryJournal, RecoveryPhase, recover_journal};
 use cyber_pumpkin_transfer::{
     CancellationToken, ControlledTransferOutcome, Endpoint, ExecutionError, RecursiveError,
     TransferId, TransferJob, TransferProgress, TransferSpec, TreeTransferOutcome,
     TreeTransferProgress, TreeTransferReport, execute_file_controlled, execute_tree_controlled,
 };
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Report produced by a safely finalized file replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,6 +61,13 @@ pub enum ReliabilityError {
         /// Existing path that prevented safe execution.
         path: BackendPath,
     },
+    /// Durable recovery-journal I/O or replay failed.
+    RecoveryJournal {
+        /// Local journal path.
+        path: PathBuf,
+        /// Journal diagnostic.
+        message: String,
+    },
     /// Payload transfer or verification failed.
     Transfer(ExecutionError),
     /// Recursive file-or-tree transfer failed.
@@ -90,6 +99,11 @@ impl fmt::Display for ReliabilityError {
                 formatter,
                 "safe-transfer sidecar already exists: {}",
                 path.as_str()
+            ),
+            Self::RecoveryJournal { path, message } => write!(
+                formatter,
+                "recovery journal failed for {}: {message}",
+                path.display()
             ),
             Self::Transfer(error) => write!(formatter, "staged transfer failed: {error}"),
             Self::Recursive(error) => write!(formatter, "reliable tree transfer failed: {error}"),
@@ -127,13 +141,34 @@ impl From<BackendError> for ReliabilityError {
     }
 }
 
+/// Request for a reliable regular-file transfer.
+///
+/// `recovery_journal` should be a path unique to the live transaction/session.
+/// When present, durable phase records are written before filesystem mutations
+/// that could otherwise leave an ambiguous replacement after process failure.
+pub struct ReliableFileRequest<'a> {
+    /// Stable transfer identifier.
+    pub id: TransferId,
+    /// Source endpoint.
+    pub source_endpoint: Endpoint,
+    /// Final destination endpoint.
+    pub destination_endpoint: Endpoint,
+    /// Source backend.
+    pub source: &'a dyn Backend,
+    /// Destination backend.
+    pub destination: &'a dyn Backend,
+    /// Cooperative cancellation token.
+    pub cancellation: &'a CancellationToken,
+    /// Optional durable recovery-journal path.
+    pub recovery_journal: Option<&'a Path>,
+}
+
 /// Copies one regular file through an operation-owned stage and safely
 /// finalizes it over the requested destination.
 ///
-/// Cancellation is honored while staging and immediately before finalization.
-/// Once the rename transaction begins it runs to completion or attempts to
-/// restore the original destination; this prevents cancellation from leaving a
-/// half-finalized replacement.
+/// This compatibility entry point preserves the pre-journal API. Call
+/// [`execute_file_reliable_request`] with `recovery_journal` set when the caller
+/// has a durable local place to store transaction state.
 ///
 /// # Errors
 ///
@@ -146,11 +181,56 @@ pub fn execute_file_reliable<F>(
     source: &dyn Backend,
     destination: &dyn Backend,
     cancellation: &CancellationToken,
+    on_progress: F,
+) -> Result<ReliableTransferOutcome, ReliabilityError>
+where
+    F: FnMut(TransferProgress),
+{
+    execute_file_reliable_request(
+        ReliableFileRequest {
+            id,
+            source_endpoint,
+            destination_endpoint,
+            source,
+            destination,
+            cancellation,
+            recovery_journal: None,
+        },
+        on_progress,
+    )
+}
+
+/// Executes a regular-file replacement with optional durable recovery phases.
+///
+/// Before beginning a journaled transaction, an existing journal at the same
+/// path is recovered against the supplied destination backend. Callers must not
+/// share one journal path across concurrent transactions.
+///
+/// # Errors
+///
+/// Returns [`ReliabilityError`] for journal replay/persistence, capability,
+/// transfer, backend, finalization, recovery, or cleanup failures.
+pub fn execute_file_reliable_request<F>(
+    request: ReliableFileRequest<'_>,
     mut on_progress: F,
 ) -> Result<ReliableTransferOutcome, ReliabilityError>
 where
     F: FnMut(TransferProgress),
 {
+    let ReliableFileRequest {
+        id,
+        source_endpoint,
+        destination_endpoint,
+        source,
+        destination,
+        cancellation,
+        recovery_journal,
+    } = request;
+
+    if let Some(journal_path) = recovery_journal {
+        recover_pending_journal(destination, journal_path)?;
+    }
+
     if destination.capabilities().atomic_rename != CapabilitySupport::Supported {
         return Err(ReliabilityError::AtomicRenameUnsupported);
     }
@@ -166,6 +246,21 @@ where
         Err(error) if error.kind() == ErrorKind::NotFound => false,
         Err(error) => return Err(error.into()),
     };
+
+    let mut recovery_entry = RecoveryEntry {
+        operation_id: id.get(),
+        destination: final_path.as_str().to_owned(),
+        stage: Some(stage_path.as_str().to_owned()),
+        backup: if destination_exists {
+            Some(backup_path.as_str().to_owned())
+        } else {
+            None
+        },
+        phase: RecoveryPhase::Staging,
+    };
+    if let Some(journal_path) = recovery_journal {
+        persist_recovery_entry(journal_path, &recovery_entry)?;
+    }
 
     let stage_spec = TransferSpec {
         source: source_endpoint,
@@ -186,12 +281,19 @@ where
     let bytes_copied = match staged {
         ControlledTransferOutcome::Completed(report) => report.bytes_copied(),
         ControlledTransferOutcome::Cancelled { bytes_copied } => {
+            remove_if_present(destination, &stage_path)?;
+            if let Some(journal_path) = recovery_journal {
+                clear_recovery_entry(journal_path, id.get())?;
+            }
             return Ok(ReliableTransferOutcome::Cancelled { bytes_copied });
         }
     };
 
     if cancellation.is_cancelled() {
         remove_if_present(destination, &stage_path)?;
+        if let Some(journal_path) = recovery_journal {
+            clear_recovery_entry(journal_path, id.get())?;
+        }
         return Ok(ReliableTransferOutcome::Cancelled { bytes_copied });
     }
 
@@ -201,6 +303,8 @@ where
         &final_path,
         &backup_path,
         destination_exists,
+        recovery_journal,
+        &mut recovery_entry,
     )?;
 
     Ok(ReliableTransferOutcome::Completed(ReliableTransferReport {
@@ -227,13 +331,29 @@ pub enum ReliableTreeOutcome {
     Cancelled(TreeTransferReport),
 }
 
+/// Request for a reliable file-or-directory-tree transfer.
+pub struct ReliableTreeRequest<'a> {
+    /// Stable transfer identifier.
+    pub id: TransferId,
+    /// Source/destination transfer specification.
+    pub spec: &'a TransferSpec,
+    /// Source backend.
+    pub source: &'a dyn Backend,
+    /// Destination backend.
+    pub destination: &'a dyn Backend,
+    /// Cooperative cancellation token.
+    pub cancellation: &'a CancellationToken,
+    /// Whether an existing destination may be replaced.
+    pub replace_existing: bool,
+    /// Optional durable recovery-journal path unique to this transaction.
+    pub recovery_journal: Option<&'a Path>,
+}
+
 /// Executes a file or directory-tree copy while preserving an existing
 /// destination across failure and cancellation.
 ///
-/// When `replace_existing` is true, the existing destination is first moved to
-/// an operation-owned sibling backup. The new tree is then created at the
-/// requested path. Failure or cancellation restores the backup; success removes
-/// the backup recursively.
+/// This compatibility entry point preserves the pre-journal API. Use
+/// [`execute_tree_reliable_request`] to enable durable transaction phases.
 ///
 /// # Errors
 ///
@@ -251,66 +371,230 @@ pub fn execute_tree_reliable<F>(
 where
     F: FnMut(TreeTransferProgress),
 {
-    let final_path = &spec.destination.path;
-    let destination_exists = match destination.stat(final_path) {
+    let request = ReliableTreeRequest {
+        id,
+        spec,
+        source,
+        destination,
+        cancellation,
+        replace_existing,
+        recovery_journal: None,
+    };
+    execute_tree_reliable_request(&request, on_progress)
+}
+
+/// Executes a tree transfer with optional durable recovery phases.
+///
+/// For a replacement, `BackupMoved` is persisted before the original object is
+/// renamed away. `Finalized` is persisted only after the new tree completes and
+/// before the backup is removed. Recovery therefore rolls back any transaction
+/// that did not durably reach `Finalized`.
+///
+/// # Errors
+///
+/// Returns [`ReliabilityError`] for journal replay/persistence, backend,
+/// recursive-transfer, cleanup, or recovery failures.
+pub fn execute_tree_reliable_request<F>(
+    request: &ReliableTreeRequest<'_>,
+    on_progress: F,
+) -> Result<ReliableTreeOutcome, ReliabilityError>
+where
+    F: FnMut(TreeTransferProgress),
+{
+    if let Some(journal_path) = request.recovery_journal {
+        recover_pending_journal(request.destination, journal_path)?;
+    }
+
+    let final_path = &request.spec.destination.path;
+    let destination_exists = match request.destination.stat(final_path) {
         Ok(_) => true,
         Err(error) if error.kind() == ErrorKind::NotFound => false,
         Err(error) => return Err(error.into()),
     };
 
-    if destination_exists && !replace_existing {
+    if destination_exists && !request.replace_existing {
         return Err(RecursiveError::DestinationExists(final_path.clone()).into());
     }
 
     if !destination_exists {
-        return execute_tree_controlled(spec, source, destination, cancellation, on_progress)
-            .map(|outcome| match outcome {
-                TreeTransferOutcome::Completed(report) => {
-                    ReliableTreeOutcome::Completed(ReliableTreeReport {
-                        transfer: report,
-                        replaced_existing: false,
-                    })
-                }
-                TreeTransferOutcome::Cancelled(report) => ReliableTreeOutcome::Cancelled(report),
-            })
-            .map_err(ReliabilityError::from);
+        return execute_new_tree_reliable(request, on_progress);
     }
 
-    if destination.capabilities().atomic_rename != CapabilitySupport::Supported {
-        return Err(ReliabilityError::AtomicRenameUnsupported);
-    }
+    execute_replacing_tree_reliable(request, on_progress)
+}
 
-    let backup_path = sidecar_path(final_path, "tree-backup", id)?;
-    ensure_absent(destination, &backup_path)?;
-    destination.rename(final_path, &backup_path)?;
-
-    match execute_tree_controlled(spec, source, destination, cancellation, on_progress) {
-        Ok(TreeTransferOutcome::Completed(report)) => {
-            if let Err(error) = remove_tree_if_present(destination, &backup_path) {
-                return Err(ReliabilityError::BackupCleanupFailed {
-                    path: backup_path,
-                    message: error.to_string(),
-                });
+fn execute_new_tree_reliable<F>(
+    request: &ReliableTreeRequest<'_>,
+    on_progress: F,
+) -> Result<ReliableTreeOutcome, ReliabilityError>
+where
+    F: FnMut(TreeTransferProgress),
+{
+    let Some(journal_path) = request.recovery_journal else {
+        return execute_tree_controlled(
+            request.spec,
+            request.source,
+            request.destination,
+            request.cancellation,
+            on_progress,
+        )
+        .map(|outcome| match outcome {
+            TreeTransferOutcome::Completed(report) => {
+                ReliableTreeOutcome::Completed(ReliableTreeReport {
+                    transfer: report,
+                    replaced_existing: false,
+                })
             }
+            TreeTransferOutcome::Cancelled(report) => ReliableTreeOutcome::Cancelled(report),
+        })
+        .map_err(ReliabilityError::from);
+    };
+
+    let final_path = &request.spec.destination.path;
+    let mut recovery_entry = RecoveryEntry {
+        operation_id: request.id.get(),
+        destination: final_path.as_str().to_owned(),
+        stage: Some(final_path.as_str().to_owned()),
+        backup: None,
+        phase: RecoveryPhase::Staging,
+    };
+    persist_recovery_entry(journal_path, &recovery_entry)?;
+
+    match execute_tree_controlled(
+        request.spec,
+        request.source,
+        request.destination,
+        request.cancellation,
+        on_progress,
+    ) {
+        Ok(TreeTransferOutcome::Completed(report)) => {
+            recovery_entry.phase = RecoveryPhase::Finalized;
+            persist_recovery_entry(journal_path, &recovery_entry)?;
+            clear_recovery_entry(journal_path, request.id.get())?;
             Ok(ReliableTreeOutcome::Completed(ReliableTreeReport {
                 transfer: report,
-                replaced_existing: true,
+                replaced_existing: false,
             }))
         }
         Ok(TreeTransferOutcome::Cancelled(report)) => {
-            restore_tree_backup(destination, final_path, &backup_path)?;
+            remove_tree_if_present(request.destination, final_path)?;
+            clear_recovery_entry(journal_path, request.id.get())?;
             Ok(ReliableTreeOutcome::Cancelled(report))
         }
-        Err(error) => {
-            let finalize = error.to_string();
-            match restore_tree_backup(destination, final_path, &backup_path) {
-                Ok(()) => Err(ReliabilityError::Recursive(error)),
-                Err(recovery) => Err(ReliabilityError::RecoveryFailed {
-                    finalize,
-                    recovery: recovery.to_string(),
-                }),
-            }
+        Err(error) => recover_failed_new_tree(request, journal_path, error),
+    }
+}
+
+fn recover_failed_new_tree(
+    request: &ReliableTreeRequest<'_>,
+    journal_path: &Path,
+    error: RecursiveError,
+) -> Result<ReliableTreeOutcome, ReliabilityError> {
+    let final_path = &request.spec.destination.path;
+    let finalize = error.to_string();
+    match remove_tree_if_present(request.destination, final_path) {
+        Ok(()) => {
+            clear_recovery_entry(journal_path, request.id.get())?;
+            Err(ReliabilityError::Recursive(error))
         }
+        Err(recovery) => Err(ReliabilityError::RecoveryFailed {
+            finalize,
+            recovery: recovery.to_string(),
+        }),
+    }
+}
+
+fn execute_replacing_tree_reliable<F>(
+    request: &ReliableTreeRequest<'_>,
+    on_progress: F,
+) -> Result<ReliableTreeOutcome, ReliabilityError>
+where
+    F: FnMut(TreeTransferProgress),
+{
+    if request.destination.capabilities().atomic_rename != CapabilitySupport::Supported {
+        return Err(ReliabilityError::AtomicRenameUnsupported);
+    }
+
+    let final_path = &request.spec.destination.path;
+    let backup_path = sidecar_path(final_path, "tree-backup", request.id)?;
+    ensure_absent(request.destination, &backup_path)?;
+    let mut recovery_entry = RecoveryEntry {
+        operation_id: request.id.get(),
+        destination: final_path.as_str().to_owned(),
+        stage: None,
+        backup: Some(backup_path.as_str().to_owned()),
+        phase: RecoveryPhase::BackupMoved,
+    };
+    if let Some(journal_path) = request.recovery_journal {
+        persist_recovery_entry(journal_path, &recovery_entry)?;
+    }
+
+    request.destination.rename(final_path, &backup_path)?;
+
+    match execute_tree_controlled(
+        request.spec,
+        request.source,
+        request.destination,
+        request.cancellation,
+        on_progress,
+    ) {
+        Ok(TreeTransferOutcome::Completed(report)) => {
+            complete_replacing_tree(request, &backup_path, &mut recovery_entry, report)
+        }
+        Ok(TreeTransferOutcome::Cancelled(report)) => {
+            restore_tree_backup(request.destination, final_path, &backup_path)?;
+            if let Some(journal_path) = request.recovery_journal {
+                clear_recovery_entry(journal_path, request.id.get())?;
+            }
+            Ok(ReliableTreeOutcome::Cancelled(report))
+        }
+        Err(error) => recover_failed_replacing_tree(request, &backup_path, error),
+    }
+}
+
+fn complete_replacing_tree(
+    request: &ReliableTreeRequest<'_>,
+    backup_path: &BackendPath,
+    recovery_entry: &mut RecoveryEntry,
+    report: TreeTransferReport,
+) -> Result<ReliableTreeOutcome, ReliabilityError> {
+    if let Some(journal_path) = request.recovery_journal {
+        recovery_entry.phase = RecoveryPhase::Finalized;
+        persist_recovery_entry(journal_path, recovery_entry)?;
+    }
+    if let Err(error) = remove_tree_if_present(request.destination, backup_path) {
+        return Err(ReliabilityError::BackupCleanupFailed {
+            path: backup_path.clone(),
+            message: error.to_string(),
+        });
+    }
+    if let Some(journal_path) = request.recovery_journal {
+        clear_recovery_entry(journal_path, request.id.get())?;
+    }
+    Ok(ReliableTreeOutcome::Completed(ReliableTreeReport {
+        transfer: report,
+        replaced_existing: true,
+    }))
+}
+
+fn recover_failed_replacing_tree(
+    request: &ReliableTreeRequest<'_>,
+    backup_path: &BackendPath,
+    error: RecursiveError,
+) -> Result<ReliableTreeOutcome, ReliabilityError> {
+    let final_path = &request.spec.destination.path;
+    let finalize = error.to_string();
+    match restore_tree_backup(request.destination, final_path, backup_path) {
+        Ok(()) => {
+            if let Some(journal_path) = request.recovery_journal {
+                clear_recovery_entry(journal_path, request.id.get())?;
+            }
+            Err(ReliabilityError::Recursive(error))
+        }
+        Err(recovery) => Err(ReliabilityError::RecoveryFailed {
+            finalize,
+            recovery: recovery.to_string(),
+        }),
     }
 }
 
@@ -344,22 +628,42 @@ fn finalize_stage(
     final_path: &BackendPath,
     backup: &BackendPath,
     destination_exists: bool,
+    recovery_journal: Option<&Path>,
+    recovery_entry: &mut RecoveryEntry,
 ) -> Result<(), ReliabilityError> {
     if !destination_exists {
+        if let Some(journal_path) = recovery_journal {
+            recovery_entry.phase = RecoveryPhase::Finalized;
+            persist_recovery_entry(journal_path, recovery_entry)?;
+        }
         if let Err(error) = destination.rename(stage, final_path) {
             let _cleanup_result = remove_if_present(destination, stage);
             return Err(error.into());
         }
+        if let Some(journal_path) = recovery_journal {
+            clear_recovery_entry(journal_path, recovery_entry.operation_id)?;
+        }
         return Ok(());
     }
 
+    if let Some(journal_path) = recovery_journal {
+        recovery_entry.phase = RecoveryPhase::BackupMoved;
+        persist_recovery_entry(journal_path, recovery_entry)?;
+    }
     destination.rename(final_path, backup)?;
 
     if let Err(finalize_error) = destination.rename(stage, final_path) {
         let recovery = destination.rename(backup, final_path);
-        let _cleanup_result = remove_if_present(destination, stage);
+        let cleanup_succeeded = remove_if_present(destination, stage).is_ok();
         return match recovery {
-            Ok(()) => Err(finalize_error.into()),
+            Ok(()) => {
+                if cleanup_succeeded {
+                    if let Some(journal_path) = recovery_journal {
+                        clear_recovery_entry(journal_path, recovery_entry.operation_id)?;
+                    }
+                }
+                Err(finalize_error.into())
+            }
             Err(recovery_error) => Err(ReliabilityError::RecoveryFailed {
                 finalize: finalize_error.to_string(),
                 recovery: recovery_error.to_string(),
@@ -367,14 +671,50 @@ fn finalize_stage(
         };
     }
 
+    if let Some(journal_path) = recovery_journal {
+        recovery_entry.phase = RecoveryPhase::Finalized;
+        persist_recovery_entry(journal_path, recovery_entry)?;
+    }
     if let Err(error) = destination.remove(backup) {
         return Err(ReliabilityError::BackupCleanupFailed {
             path: backup.clone(),
             message: error.to_string(),
         });
     }
-
+    if let Some(journal_path) = recovery_journal {
+        clear_recovery_entry(journal_path, recovery_entry.operation_id)?;
+    }
     Ok(())
+}
+
+fn journal_error(path: &Path, message: String) -> ReliabilityError {
+    ReliabilityError::RecoveryJournal {
+        path: path.to_path_buf(),
+        message,
+    }
+}
+
+fn recover_pending_journal(backend: &dyn Backend, path: &Path) -> Result<(), ReliabilityError> {
+    recover_journal(backend, path).map_err(|error| journal_error(path, error.to_string()))?;
+    Ok(())
+}
+
+fn persist_recovery_entry(path: &Path, entry: &RecoveryEntry) -> Result<(), ReliabilityError> {
+    let mut journal =
+        RecoveryJournal::load(path).map_err(|error| journal_error(path, error.to_string()))?;
+    journal.upsert(entry.clone());
+    journal
+        .save(path)
+        .map_err(|error| journal_error(path, error.to_string()))
+}
+
+fn clear_recovery_entry(path: &Path, operation_id: u64) -> Result<(), ReliabilityError> {
+    let mut journal =
+        RecoveryJournal::load(path).map_err(|error| journal_error(path, error.to_string()))?;
+    journal.remove(operation_id);
+    journal
+        .save(path)
+        .map_err(|error| journal_error(path, error.to_string()))
 }
 
 fn ensure_absent(backend: &dyn Backend, path: &BackendPath) -> Result<(), ReliabilityError> {

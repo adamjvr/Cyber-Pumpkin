@@ -2,14 +2,16 @@
 
 use cyber_pumpkin_backend::{Backend, BackendError};
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind};
-use cyber_pumpkin_reliability::{ReliableTransferOutcome, execute_file_reliable};
+use cyber_pumpkin_reliability::{
+    ReliableFileRequest, ReliableTransferOutcome, execute_file_reliable_request,
+};
 use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId};
 use cyber_pumpkin_transfer_runtime::{
     CopyConflictPolicy, CopyRequest, CopyRuntimeError, CopyRuntimeOutcome, execute_copy,
 };
 use std::fmt;
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Snapshot used to detect local edits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -35,6 +37,8 @@ pub struct RemoteEditSession {
     pub baseline: FileStamp,
     /// Remote stamp observed at download or after our last successful upload.
     pub remote_baseline: FileStamp,
+    /// Durable journal used by safe upload replacement.
+    pub recovery_journal: PathBuf,
 }
 
 /// Remote-edit failure.
@@ -103,9 +107,9 @@ pub fn create_session(
     file_name: &str,
 ) -> Result<RemoteEditSession, RemoteEditError> {
     let safe_name = sanitize_file_name(file_name);
-    let local_path = workspace_root
-        .join(format!("session-{}", id.get()))
-        .join(safe_name);
+    let session_root = workspace_root.join(format!("session-{}-{}", std::process::id(), id.get()));
+    let local_path = session_root.join(safe_name);
+    let recovery_journal = session_root.join("upload-recovery.json");
     let local_text = local_path
         .to_str()
         .ok_or(RemoteEditError::InvalidWorkspacePath)?;
@@ -120,6 +124,7 @@ pub fn create_session(
         local,
         baseline: FileStamp::default(),
         remote_baseline: FileStamp::default(),
+        recovery_journal,
     })
 }
 
@@ -199,13 +204,16 @@ pub fn upload_changed(
         return Err(RemoteEditError::RemoteChanged);
     }
 
-    match execute_file_reliable(
-        session.id,
-        session.local.clone(),
-        session.remote.clone(),
-        local_backend,
-        remote_backend,
-        cancellation,
+    match execute_file_reliable_request(
+        ReliableFileRequest {
+            id: session.id,
+            source_endpoint: session.local.clone(),
+            destination_endpoint: session.remote.clone(),
+            source: local_backend,
+            destination: remote_backend,
+            cancellation,
+            recovery_journal: Some(&session.recovery_journal),
+        },
         |_| {},
     )
     .map_err(|error| RemoteEditError::Upload(error.to_string()))?

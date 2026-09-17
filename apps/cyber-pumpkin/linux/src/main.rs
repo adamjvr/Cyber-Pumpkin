@@ -19,5 +19,6 @@ fn main() {
         .application_id("com.rothamplification.CyberPumpkin")
         .build();
     app.connect_activate(shell::build_ui);
+    app.connect_shutdown(|_| remote_edit_ui::shutdown_remote_edits());
     app.run();
 }

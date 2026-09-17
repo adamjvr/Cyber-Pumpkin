@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 cyber-pumpkin-backend = { path = "../../filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
+cyber-pumpkin-recovery = { path = "../cyber-pumpkin-recovery" }
 cyber-pumpkin-transfer = { path = "../../transfer/cyber-pumpkin-transfer" }
 
 [dev-dependencies]

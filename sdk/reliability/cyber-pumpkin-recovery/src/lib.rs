@@ -215,25 +215,48 @@ pub fn recover_entry(
         }
         RecoveryPhase::BackupMoved => {
             let Some(backup) = backup else {
-                return Ok(RecoveryAction::Noop);
+                let cleaned = if let Some(stage) = stage.as_ref() {
+                    remove_tree_if_present(backend, stage)?.entries_removed() > 0
+                } else {
+                    false
+                };
+                return Ok(if cleaned {
+                    RecoveryAction::Cleaned
+                } else {
+                    RecoveryAction::Noop
+                });
             };
+
             let destination_exists = exists(backend, &destination)?;
             let backup_exists = exists(backend, &backup)?;
-            if !destination_exists && backup_exists {
-                backend.rename(&backup, &destination)?;
-                if let Some(stage) = stage {
-                    remove_tree_if_present(backend, &stage)?;
-                }
-                Ok(RecoveryAction::Restored)
-            } else {
-                if let Some(stage) = stage {
-                    remove_tree_if_present(backend, &stage)?;
-                }
-                if backup_exists && destination_exists {
-                    remove_tree_if_present(backend, &backup)?;
-                }
-                Ok(RecoveryAction::Cleaned)
+            if !backup_exists {
+                let cleaned = if let Some(stage) = stage.as_ref() {
+                    remove_tree_if_present(backend, stage)?.entries_removed() > 0
+                } else {
+                    false
+                };
+                return Ok(if cleaned {
+                    RecoveryAction::Cleaned
+                } else {
+                    RecoveryAction::Noop
+                });
             }
+
+            // BackupMoved is deliberately conservative: until Finalized is
+            // durably recorded, the original object is authoritative. A crash
+            // may have left a partial tree at the destination or may have
+            // completed the final rename without persisting the next phase.
+            // Rolling back in both cases guarantees that recovery never keeps
+            // an incompletely committed replacement.
+            if destination_exists {
+                let _entries_removed =
+                    remove_tree_if_present(backend, &destination)?.entries_removed();
+            }
+            backend.rename(&backup, &destination)?;
+            if let Some(stage) = stage.as_ref() {
+                let _entries_removed = remove_tree_if_present(backend, stage)?.entries_removed();
+            }
+            Ok(RecoveryAction::Restored)
         }
         RecoveryPhase::Finalized => {
             let mut mutated = false;
@@ -309,6 +332,34 @@ mod tests {
         journal.save(&path)?;
         assert_eq!(RecoveryJournal::load(&path)?, journal);
 
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn backup_moved_rolls_back_partial_destination() -> Result<(), Box<dyn std::error::Error>> {
+        let root = root();
+        fs::create_dir_all(&root)?;
+        let destination = root.join("destination.txt");
+        let backup = root.join("backup.txt");
+        fs::write(&destination, b"partial replacement")?;
+        fs::write(&backup, b"original")?;
+
+        let backend = LocalBackend::new(BackendId::new("local")?);
+        let action = recover_entry(
+            &backend,
+            &RecoveryEntry {
+                operation_id: 11,
+                destination: destination.to_string_lossy().into_owned(),
+                stage: None,
+                backup: Some(backup.to_string_lossy().into_owned()),
+                phase: RecoveryPhase::BackupMoved,
+            },
+        )?;
+
+        assert_eq!(action, RecoveryAction::Restored);
+        assert_eq!(fs::read(&destination)?, b"original");
+        assert!(!backup.exists());
         fs::remove_dir_all(root)?;
         Ok(())
     }
