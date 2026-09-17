@@ -324,7 +324,10 @@ impl Default for DecisionCenter {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecisionCenter, DecisionChoice, DecisionKind, DecisionScope};
+    use super::{
+        DecisionCenter, DecisionChoice, DecisionContext, DecisionDirection, DecisionKind,
+        DecisionScope,
+    };
 
     #[test]
     fn remembered_choice_resolves_matching_request_immediately()
@@ -349,6 +352,67 @@ mod tests {
             resolution.map(|value| value.choice),
             Some(DecisionChoice::Replace)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn remembered_context_does_not_cross_direction_or_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut center = DecisionCenter::new();
+        let upload_file = DecisionContext {
+            kind: DecisionKind::ExistingFile,
+            direction: DecisionDirection::Upload,
+            source_backend: Some("local".to_owned()),
+            destination_backend: Some("sftp".to_owned()),
+            object_scope: Some("copy:file".to_owned()),
+        };
+        let download_file = DecisionContext {
+            kind: DecisionKind::ExistingFile,
+            direction: DecisionDirection::Download,
+            source_backend: Some("sftp".to_owned()),
+            destination_backend: Some("local".to_owned()),
+            object_scope: Some("copy:file".to_owned()),
+        };
+        let upload_directory = DecisionContext {
+            object_scope: Some("copy:directory".to_owned()),
+            ..upload_file.clone()
+        };
+
+        let (first, immediate) = center.request_with_context(
+            upload_file.clone(),
+            "upload.txt",
+            "destination exists",
+            vec![DecisionChoice::Replace, DecisionChoice::Skip],
+        )?;
+        assert!(immediate.is_none());
+        center.resolve(first, DecisionChoice::Replace, DecisionScope::AllMatching)?;
+
+        let (_, same) = center.request_with_context(
+            upload_file,
+            "second-upload.txt",
+            "destination exists",
+            vec![DecisionChoice::Replace, DecisionChoice::Skip],
+        )?;
+        assert_eq!(
+            same.map(|resolution| resolution.choice),
+            Some(DecisionChoice::Replace)
+        );
+
+        let (_, opposite_direction) = center.request_with_context(
+            download_file,
+            "download.txt",
+            "destination exists",
+            vec![DecisionChoice::Replace, DecisionChoice::Skip],
+        )?;
+        assert!(opposite_direction.is_none());
+
+        let (_, different_scope) = center.request_with_context(
+            upload_directory,
+            "folder",
+            "destination exists",
+            vec![DecisionChoice::Replace, DecisionChoice::Skip],
+        )?;
+        assert!(different_scope.is_none());
         Ok(())
     }
 

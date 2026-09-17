@@ -1,7 +1,9 @@
 use crate::activity;
 use crate::browser::{PaneHandle, format_size};
 use adw::prelude::*;
-use cyber_pumpkin_decisions::{DecisionCenter, DecisionChoice, DecisionKind, DecisionScope};
+use cyber_pumpkin_decisions::{
+    DecisionCenter, DecisionChoice, DecisionContext, DecisionDirection, DecisionKind, DecisionScope,
+};
 use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_operations::{OperationId, OperationKind, OperationProgress, OperationQueue};
 use cyber_pumpkin_sync::{
@@ -340,10 +342,33 @@ impl SyncPanel {
         self.request_conflict_decision(prepared);
     }
 
+    fn sync_conflict_context(&self, prepared: &PreparedPlan) -> DecisionContext {
+        let (source, destination) = self.panes_for_direction(prepared.direction);
+        let source_connection = source.connection();
+        let destination_connection = destination.connection();
+        let direction = match (
+            source_connection.is_local(),
+            destination_connection.is_local(),
+        ) {
+            (true, false) => DecisionDirection::Upload,
+            (false, true) => DecisionDirection::Download,
+            (true, true) => DecisionDirection::Local,
+            (false, false) => DecisionDirection::Neutral,
+        };
+
+        DecisionContext {
+            kind: DecisionKind::TypeConflict,
+            direction,
+            source_backend: Some(source_connection.backend_family().to_owned()),
+            destination_backend: Some(destination_connection.backend_family().to_owned()),
+            object_scope: Some("sync:type-conflict".to_owned()),
+        }
+    }
+
     fn request_conflict_decision(&self, prepared: PreparedPlan) {
         let conflict_count = prepared.plan.summary().conflicts;
-        let request = self.decision_center.borrow_mut().request(
-            DecisionKind::TypeConflict,
+        let request = self.decision_center.borrow_mut().request_with_context(
+            self.sync_conflict_context(&prepared),
             format!("{conflict_count} sync type conflicts"),
             "Source and destination contain different entry types at matching paths.",
             vec![

@@ -75,6 +75,13 @@ impl PaneConnection {
         matches!(self, Self::Local { .. })
     }
 
+    pub(crate) const fn backend_family(&self) -> &'static str {
+        match self {
+            Self::Local { .. } => "local",
+            Self::Sftp { .. } => "sftp",
+        }
+    }
+
     pub(crate) fn display_name(&self) -> String {
         match self {
             Self::Local { .. } => "Local".to_owned(),

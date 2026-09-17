@@ -7,7 +7,9 @@ use adw::prelude::*;
 use cyber_pumpkin_application::{AppPreferences, ExistingItemAction};
 use cyber_pumpkin_backend::{BackendError, ErrorKind};
 use cyber_pumpkin_core::{BackendPath, EntryKind, FileEntry};
-use cyber_pumpkin_decisions::{DecisionCenter, DecisionChoice, DecisionKind, DecisionScope};
+use cyber_pumpkin_decisions::{
+    DecisionCenter, DecisionChoice, DecisionContext, DecisionDirection, DecisionKind, DecisionScope,
+};
 use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_operations::{OperationId, OperationKind, OperationProgress, OperationQueue};
 use cyber_pumpkin_scheduler::{OperationScheduler, SchedulerLimits};
@@ -252,6 +254,37 @@ fn request_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
     }
 }
 
+fn copy_decision_context(
+    source: &PaneHandle,
+    destination: &PaneHandle,
+    kind: DecisionKind,
+    entry_kind: EntryKind,
+) -> DecisionContext {
+    let source_connection = source.connection();
+    let destination_connection = destination.connection();
+    let direction = match (
+        source_connection.is_local(),
+        destination_connection.is_local(),
+    ) {
+        (true, false) => DecisionDirection::Upload,
+        (false, true) => DecisionDirection::Download,
+        (true, true) => DecisionDirection::Local,
+        (false, false) => DecisionDirection::Neutral,
+    };
+    let object_scope = match entry_kind {
+        EntryKind::Directory => "copy:directory",
+        _ => "copy:file",
+    };
+
+    DecisionContext {
+        kind,
+        direction,
+        source_backend: Some(source_connection.backend_family().to_owned()),
+        destination_backend: Some(destination_connection.backend_family().to_owned()),
+        object_scope: Some(object_scope.to_owned()),
+    }
+}
+
 fn preferred_existing_action(
     source: &PaneHandle,
     destination: &PaneHandle,
@@ -282,8 +315,8 @@ fn request_existing_item_decision(
     } else {
         DecisionKind::ExistingFile
     };
-    let request = bar.decision_center.borrow_mut().request(
-        kind,
+    let request = bar.decision_center.borrow_mut().request_with_context(
+        copy_decision_context(source, destination, kind, entry.kind),
         entry.name.clone(),
         format!("The destination already contains “{}”.", entry.name),
         vec![
