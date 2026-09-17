@@ -5,9 +5,11 @@ use cyber_pumpkin_application::{
 };
 use cyber_pumpkin_backend::Backend;
 use cyber_pumpkin_core::{BackendId, BackendPath, FileEntry};
+use cyber_pumpkin_file_ops::remove_tree;
 use cyber_pumpkin_history::HistoryLog;
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_reliability::{ReliableTransferOutcome, execute_file_reliable};
+use cyber_pumpkin_remote_edit::{create_session, download_initial, local_changed, upload_changed};
 use cyber_pumpkin_sftp::{SftpAuth, SftpBackend, SftpConfig};
 use cyber_pumpkin_sync::{ConflictPolicy, SyncExecutionOutcome, execute_plan_with_conflicts};
 use cyber_pumpkin_sync_plan::{SyncOptions, plan_one_way};
@@ -19,6 +21,7 @@ use cyber_pumpkin_transfer_runtime::{
     CopyConflictPolicy, CopyRequest, CopyRuntimeOutcome, execute_copy as execute_runtime_copy,
 };
 use std::error::Error;
+use std::fs;
 use std::io;
 
 const USAGE: &str = r"Cyber-Pumpkin cpk
@@ -33,10 +36,12 @@ USAGE:
   cpk local-mkdir <path>
   cpk local-rename <source> <destination>
   cpk local-rm <path>
+  cpk local-rm-tree <path>
   cpk local-replace-safe <source> <destination>
   cpk copy-runtime-local <source> <destination> [--conflicts=fail|replace|skip|keep-both]
   cpk sync-plan-local <source-dir> <destination-dir> [--delete-orphans]
   cpk sync-run-local <source-dir> <destination-dir> [--delete-orphans] [--conflicts=fail|skip|replace]
+  cpk remote-edit-local-probe <remote-file> <workspace-dir>
   cpk history-list
   cpk history-clear
   cpk profile-list
@@ -78,10 +83,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("local-mkdir") => local_mkdir_command(&mut args)?,
         Some("local-rename") => local_rename_command(&mut args)?,
         Some("local-rm") => local_remove_command(&mut args)?,
+        Some("local-rm-tree") => local_remove_tree_command(&mut args)?,
         Some("local-replace-safe") => local_replace_safe_command(&mut args)?,
         Some("copy-runtime-local") => copy_runtime_local_command(&mut args)?,
         Some("sync-plan-local") => sync_plan_local_command(&mut args)?,
         Some("sync-run-local") => sync_run_local_command(&mut args)?,
+        Some("remote-edit-local-probe") => remote_edit_local_probe_command(&mut args)?,
         Some("history-list") => history_list_command(&mut args)?,
         Some("history-clear") => history_clear_command(&mut args)?,
         Some("profile-list") => profile_list_command(&mut args)?,
@@ -145,6 +152,75 @@ fn local_mkdir_command(args: &mut impl Iterator<Item = String>) -> Result<(), Bo
     let path = next_arg(args, "path")?;
     ensure_finished(args)?;
     local_mkdir(&path)
+}
+
+fn local_remove_tree_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let path = next_arg(args, "path")?;
+    ensure_finished(args)?;
+    let backend = local_backend()?;
+    let backend_path = BackendPath::new(path)?;
+    let report = remove_tree(&backend, &backend_path)?;
+    println!(
+        "removed files={} directories={} entries={}",
+        report.files_removed,
+        report.directories_removed,
+        report.entries_removed(),
+    );
+    Ok(())
+}
+
+fn remote_edit_local_probe_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let remote_file = next_arg(args, "remote-file")?;
+    let workspace = next_arg(args, "workspace-dir")?;
+    ensure_finished(args)?;
+
+    let remote_id = BackendId::new("remote-edit-probe-remote")?;
+    let local_id = BackendId::new("remote-edit-probe-local")?;
+    let remote_backend = LocalBackend::new(remote_id.clone());
+    let local_backend = LocalBackend::new(local_id.clone());
+    let remote_path = BackendPath::new(remote_file)?;
+    let entry = remote_backend.stat(&remote_path)?;
+
+    let mut session = create_session(
+        TransferId::new(1)?,
+        Endpoint {
+            backend: remote_id,
+            path: remote_path,
+        },
+        local_id,
+        std::path::Path::new(&workspace),
+        &entry.name,
+    )?;
+
+    download_initial(
+        &mut session,
+        &remote_backend,
+        &local_backend,
+        &CancellationToken::new(),
+    )?;
+
+    let mut bytes = fs::read(session.local.path.as_str())?;
+    bytes.extend_from_slice(b"\nCYBER-PUMPKIN REMOTE EDIT PROBE\n");
+    fs::write(session.local.path.as_str(), bytes)?;
+    if !local_changed(&session, &local_backend)? {
+        return Err(io::Error::other("remote-edit probe failed to detect local change").into());
+    }
+    let uploaded = upload_changed(
+        &mut session,
+        &local_backend,
+        &remote_backend,
+        &CancellationToken::new(),
+    )?;
+    println!(
+        "remote-edit uploaded={} local={}",
+        uploaded,
+        session.local.path.as_str()
+    );
+    Ok(())
 }
 
 fn local_rename_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {

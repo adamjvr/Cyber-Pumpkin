@@ -70,9 +70,11 @@ dependencies = [
  "cyber-pumpkin-application",
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
+ "cyber-pumpkin-file-ops",
  "cyber-pumpkin-history",
  "cyber-pumpkin-local",
  "cyber-pumpkin-reliability",
+ "cyber-pumpkin-remote-edit",
  "cyber-pumpkin-sftp",
  "cyber-pumpkin-sync",
  "cyber-pumpkin-sync-plan",
@@ -105,6 +107,15 @@ name = "cyber-pumpkin-decisions"
 version = "0.1.0"
 
 [[package]]
+name = "cyber-pumpkin-file-ops"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-local",
+]
+
+[[package]]
 name = "cyber-pumpkin-history"
 version = "0.1.0"
 dependencies = [
@@ -120,9 +131,11 @@ dependencies = [
  "cyber-pumpkin-backend",
  "cyber-pumpkin-core",
  "cyber-pumpkin-decisions",
+ "cyber-pumpkin-file-ops",
  "cyber-pumpkin-history",
  "cyber-pumpkin-local",
  "cyber-pumpkin-operations",
+ "cyber-pumpkin-remote-edit",
  "cyber-pumpkin-scheduler",
  "cyber-pumpkin-secrets",
  "cyber-pumpkin-sftp",
@@ -147,6 +160,18 @@ name = "cyber-pumpkin-operations"
 version = "0.1.0"
 
 [[package]]
+name = "cyber-pumpkin-recovery"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-file-ops",
+ "cyber-pumpkin-local",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cyber-pumpkin-reliability"
 version = "0.1.0"
 dependencies = [
@@ -154,6 +179,18 @@ dependencies = [
  "cyber-pumpkin-core",
  "cyber-pumpkin-local",
  "cyber-pumpkin-transfer",
+]
+
+[[package]]
+name = "cyber-pumpkin-remote-edit"
+version = "0.1.0"
+dependencies = [
+ "cyber-pumpkin-backend",
+ "cyber-pumpkin-core",
+ "cyber-pumpkin-local",
+ "cyber-pumpkin-reliability",
+ "cyber-pumpkin-transfer",
+ "cyber-pumpkin-transfer-runtime",
 ]
 
 [[package]]

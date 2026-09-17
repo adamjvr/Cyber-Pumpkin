@@ -2,6 +2,7 @@ use crate::connection::{PaneConnection, PaneSftpAuth};
 use adw::prelude::*;
 use cyber_pumpkin_application::PaneSession;
 use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind, FileEntry};
+use cyber_pumpkin_file_ops::remove_tree;
 use gtk::Orientation;
 use gtk::gio;
 use std::cell::{Cell, RefCell};
@@ -295,15 +296,17 @@ impl PaneHandle {
                     .set_text(&format!("Connect failed: {error}"));
                 error
             })?;
-        backend.remove(&entry.path).map_err(|error| {
+        let report = remove_tree(backend.as_ref(), &entry.path).map_err(|error| {
             let message = format!("Delete failed: {error}");
             self.widgets.footer.set_text(&message);
             message
         })?;
 
-        self.widgets
-            .footer
-            .set_text(&format!("Deleted {}", entry.name));
+        self.widgets.footer.set_text(&format!(
+            "Deleted {} • {} entries",
+            entry.name,
+            report.entries_removed()
+        ));
         self.refresh();
         Ok(entry.name)
     }

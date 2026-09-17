@@ -3,6 +3,7 @@ use crate::browser::{PaneHandle, PaneSide, SortMode, build_pane};
 use crate::inspector::InspectorPane;
 use crate::pane_workspace::{PaneMode, PaneWorkspace};
 use crate::preferences_ui;
+use crate::remote_edit_ui;
 use crate::sync_ui::SyncPanel;
 use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
@@ -323,6 +324,7 @@ fn build_menu_model() -> gio::Menu {
     file.append(Some("Disconnect to Local"), Some("app.disconnect-local"));
     file.append(Some("New Folder…"), Some("app.new-folder"));
     file.append(Some("Rename…"), Some("app.rename"));
+    file.append(Some("Edit Remote File…"), Some("app.remote-edit"));
     file.append(Some("Delete…"), Some("app.delete"));
     file.append(Some("Close Window"), Some("app.close-window"));
     file.append(Some("Quit Cyber-Pumpkin"), Some("app.quit"));
@@ -360,6 +362,7 @@ fn build_menu_model() -> gio::Menu {
 
     let transfer = gio::Menu::new();
     transfer.append(Some("Copy to Other Pane"), Some("app.copy-other"));
+    transfer.append(Some("Edit Remote File"), Some("app.remote-edit"));
     transfer.append(Some("Sync Files"), Some("app.sync"));
     transfer.append(Some("Activity"), Some("app.activity"));
     transfer.append(Some("Clear Activity"), Some("app.clear-activity"));
@@ -446,6 +449,10 @@ fn install_file_actions(app: &adw::Application, context: &ActionContext) {
                 Rc::clone(&context.decision_center),
             );
         }
+    });
+    install_simple_action(app, "remote-edit", {
+        let context = context.clone();
+        move || remote_edit_ui::edit_selected_remote_file(active_pane(&context))
     });
 }
 
@@ -595,6 +602,7 @@ fn install_accelerators(app: &adw::Application) {
     app.set_accels_for_action("app.new-folder", &["<Primary><Shift>n"]);
     app.set_accels_for_action("app.rename", &["F2"]);
     app.set_accels_for_action("app.delete", &["Delete"]);
+    app.set_accels_for_action("app.remote-edit", &["<Primary>e"]);
     app.set_accels_for_action("app.info", &["<Primary>i"]);
     app.set_accels_for_action("app.copy-other", &["<Primary><Shift>c"]);
     app.set_accels_for_action("app.hidden", &["<Primary>period"]);
@@ -692,7 +700,7 @@ fn show_delete_dialog(
     content.set_margin_end(16);
 
     let label = gtk::Label::new(Some(&format!(
-        "Delete “{name}”? Non-empty folders are not removed recursively yet."
+        "Delete “{name}”? Non-empty folders will be removed recursively."
     )));
     label.set_wrap(true);
     label.set_xalign(0.0);

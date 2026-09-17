@@ -15,6 +15,7 @@ cyber-pumpkin-core = { version = "0.1.0", path = "../../../sdk/foundation/cyber-
 cyber-pumpkin-decisions = { version = "0.1.0", path = "../../../sdk/decisions/cyber-pumpkin-decisions" }
 cyber-pumpkin-history = { version = "0.1.0", path = "../../../sdk/history/cyber-pumpkin-history" }
 cyber-pumpkin-local = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-local" }
+cyber-pumpkin-file-ops = { version = "0.1.0", path = "../../../sdk/filesystem/cyber-pumpkin-file-ops" }
 cyber-pumpkin-sftp = { version = "0.1.0", path = "../../../sdk/ssh/cyber-pumpkin-sftp" }
 cyber-pumpkin-secrets = { version = "0.1.0", path = "../../../sdk/security/cyber-pumpkin-secrets" }
 cyber-pumpkin-operations = { version = "0.1.0", path = "../../../sdk/operations/cyber-pumpkin-operations" }
@@ -23,6 +24,7 @@ cyber-pumpkin-sync-plan = { version = "0.1.0", path = "../../../sdk/sync/cyber-p
 cyber-pumpkin-sync = { version = "0.1.0", path = "../../../sdk/sync/cyber-pumpkin-sync" }
 cyber-pumpkin-transfer = { version = "0.1.0", path = "../../../sdk/transfer/cyber-pumpkin-transfer" }
 cyber-pumpkin-transfer-runtime = { version = "0.1.0", path = "../../../sdk/transfer/cyber-pumpkin-transfer-runtime" }
+cyber-pumpkin-remote-edit = { version = "0.1.0", path = "../../../sdk/remote-edit/cyber-pumpkin-remote-edit" }
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_6"] }
 
 [lints]

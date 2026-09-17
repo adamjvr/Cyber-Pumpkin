@@ -1,0 +1,18 @@
+[package]
+name = "cyber-pumpkin-file-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+cyber-pumpkin-backend = { path = "../cyber-pumpkin-backend" }
+cyber-pumpkin-core = { path = "../../foundation/cyber-pumpkin-core" }
+
+[dev-dependencies]
+cyber-pumpkin-local = { path = "../cyber-pumpkin-local" }
+
+[lints]
+workspace = true

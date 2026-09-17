@@ -11,12 +11,14 @@ cyber-pumpkin-backend = { path = "../../sdk/filesystem/cyber-pumpkin-backend" }
 cyber-pumpkin-core = { path = "../../sdk/foundation/cyber-pumpkin-core" }
 cyber-pumpkin-history = { path = "../../sdk/history/cyber-pumpkin-history" }
 cyber-pumpkin-local = { path = "../../sdk/filesystem/cyber-pumpkin-local" }
+cyber-pumpkin-file-ops = { path = "../../sdk/filesystem/cyber-pumpkin-file-ops" }
 cyber-pumpkin-sftp = { path = "../../sdk/ssh/cyber-pumpkin-sftp" }
 cyber-pumpkin-sync-plan = { path = "../../sdk/sync/cyber-pumpkin-sync-plan" }
 cyber-pumpkin-sync = { path = "../../sdk/sync/cyber-pumpkin-sync" }
 cyber-pumpkin-reliability = { path = "../../sdk/reliability/cyber-pumpkin-reliability" }
 cyber-pumpkin-transfer = { path = "../../sdk/transfer/cyber-pumpkin-transfer" }
 cyber-pumpkin-transfer-runtime = { path = "../../sdk/transfer/cyber-pumpkin-transfer-runtime" }
+cyber-pumpkin-remote-edit = { path = "../../sdk/remote-edit/cyber-pumpkin-remote-edit" }
 
 [lints]
 workspace = true

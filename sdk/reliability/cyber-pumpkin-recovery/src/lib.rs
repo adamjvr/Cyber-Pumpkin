@@ -1,0 +1,273 @@
+//! Persistent recovery journal for interrupted replacement operations.
+
+use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
+use cyber_pumpkin_core::BackendPath;
+use cyber_pumpkin_file_ops::remove_tree_if_present;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
+use std::path::Path;
+
+/// Recovery state for one replacement transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RecoveryPhase {
+    /// Temporary stage may exist; original destination has not moved.
+    Staging,
+    /// Original destination has moved to backup.
+    BackupMoved,
+    /// New destination finalized; backup may remain.
+    Finalized,
+}
+
+/// Persisted recovery entry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryEntry {
+    /// Stable operation identifier.
+    pub operation_id: u64,
+    /// Destination path.
+    pub destination: String,
+    /// Optional stage sidecar.
+    pub stage: Option<String>,
+    /// Optional backup sidecar.
+    pub backup: Option<String>,
+    /// Last durable phase.
+    pub phase: RecoveryPhase,
+}
+
+/// Versioned journal.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryJournal {
+    /// On-disk format version.
+    pub version: u32,
+    /// Active recovery entries.
+    pub entries: Vec<RecoveryEntry>,
+}
+
+impl Default for RecoveryJournal {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl RecoveryJournal {
+    /// Loads a journal. A missing file produces an empty journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::Error`] for malformed JSON or I/O failures.
+    pub fn load(path: &Path) -> Result<Self, io::Error> {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Saves atomically through a sibling temporary file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::Error`] for serialization or filesystem failures.
+    pub fn save(&self, path: &Path) -> Result<(), io::Error> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let temporary = path.with_extension("json.tmp");
+        fs::write(&temporary, bytes)?;
+        fs::rename(temporary, path)
+    }
+
+    /// Inserts or replaces one operation entry.
+    pub fn upsert(&mut self, entry: RecoveryEntry) {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|existing| existing.operation_id == entry.operation_id)
+        {
+            *existing = entry;
+        } else {
+            self.entries.push(entry);
+            self.entries.sort_by_key(|entry| entry.operation_id);
+        }
+    }
+
+    /// Removes a completed operation.
+    pub fn remove(&mut self, operation_id: u64) {
+        self.entries
+            .retain(|entry| entry.operation_id != operation_id);
+    }
+}
+
+/// Recovery action taken for one journal entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecoveryAction {
+    /// Stage/backup sidecars were cleaned.
+    Cleaned,
+    /// Backup was restored to the missing destination.
+    Restored,
+    /// Entry required no backend mutation.
+    Noop,
+}
+
+/// Recovers one interrupted replacement conservatively.
+///
+/// # Errors
+///
+/// Returns [`BackendError`] when cleanup or restore operations fail.
+pub fn recover_entry(
+    backend: &dyn Backend,
+    entry: &RecoveryEntry,
+) -> Result<RecoveryAction, BackendError> {
+    let destination = BackendPath::new(entry.destination.clone()).map_err(|error| {
+        BackendError::new(
+            ErrorKind::InvalidInput,
+            "decode recovery destination",
+            None,
+            error.to_string(),
+        )
+    })?;
+
+    let stage = decode_optional("decode recovery stage", entry.stage.as_deref())?;
+    let backup = decode_optional("decode recovery backup", entry.backup.as_deref())?;
+
+    match entry.phase {
+        RecoveryPhase::Staging => {
+            if let Some(stage) = stage {
+                remove_tree_if_present(backend, &stage)?;
+                Ok(RecoveryAction::Cleaned)
+            } else {
+                Ok(RecoveryAction::Noop)
+            }
+        }
+        RecoveryPhase::BackupMoved => {
+            let Some(backup) = backup else {
+                return Ok(RecoveryAction::Noop);
+            };
+            let destination_exists = exists(backend, &destination)?;
+            let backup_exists = exists(backend, &backup)?;
+            if !destination_exists && backup_exists {
+                backend.rename(&backup, &destination)?;
+                if let Some(stage) = stage {
+                    remove_tree_if_present(backend, &stage)?;
+                }
+                Ok(RecoveryAction::Restored)
+            } else {
+                if let Some(stage) = stage {
+                    remove_tree_if_present(backend, &stage)?;
+                }
+                if backup_exists && destination_exists {
+                    remove_tree_if_present(backend, &backup)?;
+                }
+                Ok(RecoveryAction::Cleaned)
+            }
+        }
+        RecoveryPhase::Finalized => {
+            let mut mutated = false;
+            if let Some(stage) = stage {
+                mutated |= remove_tree_if_present(backend, &stage)?.entries_removed() > 0;
+            }
+            if let Some(backup) = backup {
+                mutated |= remove_tree_if_present(backend, &backup)?.entries_removed() > 0;
+            }
+            Ok(if mutated {
+                RecoveryAction::Cleaned
+            } else {
+                RecoveryAction::Noop
+            })
+        }
+    }
+}
+
+fn decode_optional(
+    operation: &'static str,
+    value: Option<&str>,
+) -> Result<Option<BackendPath>, BackendError> {
+    value
+        .map(|value| {
+            BackendPath::new(value.to_owned()).map_err(|error| {
+                BackendError::new(ErrorKind::InvalidInput, operation, None, error.to_string())
+            })
+        })
+        .transpose()
+}
+
+fn exists(backend: &dyn Backend, path: &BackendPath) -> Result<bool, BackendError> {
+    match backend.stat(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RecoveryAction, RecoveryEntry, RecoveryJournal, RecoveryPhase, recover_entry};
+    use cyber_pumpkin_core::BackendId;
+    use cyber_pumpkin_local::LocalBackend;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+
+    fn root() -> PathBuf {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "cyber-pumpkin-recovery-{}-{serial}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn journal_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let root = root();
+        fs::create_dir_all(&root)?;
+        let path = root.join("journal.json");
+
+        let mut journal = RecoveryJournal::default();
+        journal.upsert(RecoveryEntry {
+            operation_id: 9,
+            destination: "/tmp/destination".to_owned(),
+            stage: Some("/tmp/stage".to_owned()),
+            backup: None,
+            phase: RecoveryPhase::Staging,
+        });
+        journal.save(&path)?;
+        assert_eq!(RecoveryJournal::load(&path)?, journal);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn backup_moved_restores_missing_destination() -> Result<(), Box<dyn std::error::Error>> {
+        let root = root();
+        fs::create_dir_all(&root)?;
+        let destination = root.join("destination.txt");
+        let backup = root.join("backup.txt");
+        fs::write(&backup, b"original")?;
+
+        let backend = LocalBackend::new(BackendId::new("local")?);
+        let action = recover_entry(
+            &backend,
+            &RecoveryEntry {
+                operation_id: 10,
+                destination: destination.to_string_lossy().into_owned(),
+                stage: None,
+                backup: Some(backup.to_string_lossy().into_owned()),
+                phase: RecoveryPhase::BackupMoved,
+            },
+        )?;
+
+        assert_eq!(action, RecoveryAction::Restored);
+        assert_eq!(fs::read(destination)?, b"original");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}

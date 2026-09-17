@@ -6,6 +6,7 @@ mod connection;
 mod inspector;
 mod pane_workspace;
 mod preferences_ui;
+mod remote_edit_ui;
 mod server_workspace;
 mod shell;
 mod sync_ui;

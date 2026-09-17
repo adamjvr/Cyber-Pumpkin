@@ -53,3 +53,11 @@ Pass 14B rule: saved profiles contain only auth mode, paths, and secret-store re
 | `cyber-pumpkin-transfer-runtime` | product copy policy, Keep Both, and reliable tree replacement |
 
 Pass 15 rule: ordinary copy, sync, and UI conflict handling converge on shared policy/reliability primitives; Linux copy admission is driven by OperationQueue + OperationScheduler.
+
+| `cyber-pumpkin-file-ops` | backend-neutral recursive filesystem operations |
+
+| `cyber-pumpkin-remote-edit` | remote-edit workspace, change detection, reliable upload |
+
+| `cyber-pumpkin-recovery` | durable recovery journal and stale-sidecar repair |
+
+Pass 16 rule: recursive destructive operations live in shared file-ops; remote-edit changes upload through the reliability layer; interrupted replacement state is journalable and recoverable without guessing.
