@@ -1,5 +1,5 @@
 use cyber_pumpkin_application::AppPreferences;
-use cyber_pumpkin_backend::Backend;
+use cyber_pumpkin_backend::{Backend, BackendError};
 use cyber_pumpkin_core::BackendId;
 use cyber_pumpkin_local::LocalBackend;
 use cyber_pumpkin_sftp::{PrivateKeyAuth, SftpAuth, SftpBackend, SftpConfig};
@@ -88,6 +88,11 @@ impl PaneConnection {
     }
 
     pub(crate) fn connect_backend(&self) -> Result<Box<dyn Backend>, String> {
+        self.connect_backend_typed()
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn connect_backend_typed(&self) -> Result<Box<dyn Backend>, BackendError> {
         match self {
             Self::Local { id } => Ok(Box::new(LocalBackend::new(id.clone()))),
             Self::Sftp {
@@ -99,8 +104,7 @@ impl PaneConnection {
                 trusted_fingerprint,
             } => {
                 let preferences = AppPreferences::load_default().unwrap_or_default();
-                let mut config = SftpConfig::new(id.clone(), host, username)
-                    .map_err(|error| error.to_string())?
+                let mut config = SftpConfig::new(id.clone(), host, username)?
                     .with_port(*port)
                     .with_max_redials(2);
 
@@ -129,8 +133,7 @@ impl PaneConnection {
                     }
                 };
 
-                let backend =
-                    SftpBackend::connect(&config, &auth).map_err(|error| error.to_string())?;
+                let backend = SftpBackend::connect(&config, &auth)?;
                 Ok(Box::new(backend))
             }
         }

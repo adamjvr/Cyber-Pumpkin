@@ -5,20 +5,24 @@ use crate::browser::{PaneHandle, format_size};
 use crate::connection::PaneConnection;
 use adw::prelude::*;
 use cyber_pumpkin_application::{AppPreferences, ExistingItemAction};
-use cyber_pumpkin_backend::ErrorKind;
+use cyber_pumpkin_backend::{BackendError, ErrorKind};
 use cyber_pumpkin_core::{BackendPath, EntryKind, FileEntry};
 use cyber_pumpkin_decisions::{DecisionCenter, DecisionChoice, DecisionKind, DecisionScope};
 use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_operations::{OperationId, OperationKind, OperationProgress, OperationQueue};
 use cyber_pumpkin_scheduler::{OperationScheduler, SchedulerLimits};
-use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId, TreeTransferProgress};
+use cyber_pumpkin_transfer::{
+    CancellationToken, Endpoint, TransferId, TreeTransferProgress, TreeTransferReport,
+};
 use cyber_pumpkin_transfer_runtime::{
-    CopyConflictPolicy, CopyRequest, CopyRuntimeOutcome, execute_copy,
+    CopyConflictPolicy, CopyRequest, CopyRuntimeError, CopyRuntimeOutcome, RetryPolicy,
+    execute_copy, retryable_copy_error, retryable_error_kind,
 };
 use gtk::Orientation;
 use gtk::glib::{self, ControlFlow};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::rc::Rc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
@@ -54,7 +58,42 @@ struct CopyJob {
 
 enum CopyWorkerEvent {
     Progress(TreeTransferProgress),
+    Retrying {
+        next_attempt: u8,
+        max_attempts: u8,
+        delay: Duration,
+        reason: String,
+    },
     Finished(Result<CopyRuntimeOutcome, String>),
+}
+
+#[derive(Debug)]
+enum CopyAttemptError {
+    Connection {
+        endpoint: &'static str,
+        error: BackendError,
+    },
+    Copy(CopyRuntimeError),
+}
+
+impl CopyAttemptError {
+    fn retryable(&self) -> bool {
+        match self {
+            Self::Connection { error, .. } => retryable_error_kind(error.kind()),
+            Self::Copy(error) => retryable_copy_error(error),
+        }
+    }
+}
+
+impl fmt::Display for CopyAttemptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connection { endpoint, error } => {
+                write!(formatter, "{endpoint} connection failed: {error}")
+            }
+            Self::Copy(error) => write!(formatter, "{error}"),
+        }
+    }
 }
 
 pub(crate) fn build_copy_bar(
@@ -470,25 +509,94 @@ fn start_worker(job: CopyJob, bar: &CopyBar) {
     let (sender, receiver) = mpsc::channel();
 
     let _worker = std::thread::spawn(move || {
-        let result = (|| {
-            let source_backend = source_connection.connect_backend()?;
-            let destination_backend = destination_connection.connect_backend()?;
-            let progress_sender = sender.clone();
-            execute_copy(
-                &request,
-                source_backend.as_ref(),
-                destination_backend.as_ref(),
-                &cancellation,
-                move |progress| {
-                    let _sent = progress_sender.send(CopyWorkerEvent::Progress(progress));
-                },
-            )
-            .map_err(|error| error.to_string())
-        })();
+        let result = execute_copy_with_retry(
+            &request,
+            &source_connection,
+            &destination_connection,
+            &cancellation,
+            &sender,
+        );
         let _sent = sender.send(CopyWorkerEvent::Finished(result));
     });
 
     watch_result(receiver, job, bar.clone());
+}
+
+fn execute_copy_with_retry(
+    request: &CopyRequest,
+    source_connection: &PaneConnection,
+    destination_connection: &PaneConnection,
+    cancellation: &CancellationToken,
+    sender: &mpsc::Sender<CopyWorkerEvent>,
+) -> Result<CopyRuntimeOutcome, String> {
+    let policy = RetryPolicy::default();
+    let mut attempt = 1_u8;
+
+    loop {
+        if cancellation.is_cancelled() {
+            return Ok(CopyRuntimeOutcome::Cancelled(TreeTransferReport::default()));
+        }
+
+        match execute_copy_attempt(
+            request,
+            source_connection,
+            destination_connection,
+            cancellation,
+            sender,
+        ) {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => {
+                if !error.retryable() || !policy.allows_retry_after(attempt) {
+                    return Err(error.to_string());
+                }
+
+                let delay = policy.backoff_after(attempt);
+                let _sent = sender.send(CopyWorkerEvent::Retrying {
+                    next_attempt: attempt.saturating_add(1),
+                    max_attempts: policy.max_attempts(),
+                    delay,
+                    reason: error.to_string(),
+                });
+                std::thread::sleep(delay);
+                if cancellation.is_cancelled() {
+                    return Ok(CopyRuntimeOutcome::Cancelled(TreeTransferReport::default()));
+                }
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn execute_copy_attempt(
+    request: &CopyRequest,
+    source_connection: &PaneConnection,
+    destination_connection: &PaneConnection,
+    cancellation: &CancellationToken,
+    sender: &mpsc::Sender<CopyWorkerEvent>,
+) -> Result<CopyRuntimeOutcome, CopyAttemptError> {
+    let source_backend = source_connection.connect_backend_typed().map_err(|error| {
+        CopyAttemptError::Connection {
+            endpoint: "source",
+            error,
+        }
+    })?;
+    let destination_backend = destination_connection
+        .connect_backend_typed()
+        .map_err(|error| CopyAttemptError::Connection {
+            endpoint: "destination",
+            error,
+        })?;
+    let progress_sender = sender.clone();
+    execute_copy(
+        request,
+        source_backend.as_ref(),
+        destination_backend.as_ref(),
+        cancellation,
+        move |progress| {
+            let _sent = progress_sender.send(CopyWorkerEvent::Progress(progress));
+        },
+    )
+    .map_err(CopyAttemptError::Copy)
 }
 
 fn watch_result(receiver: mpsc::Receiver<CopyWorkerEvent>, job: CopyJob, bar: CopyBar) {
@@ -497,6 +605,19 @@ fn watch_result(receiver: mpsc::Receiver<CopyWorkerEvent>, job: CopyJob, bar: Co
             match receiver.try_recv() {
                 Ok(CopyWorkerEvent::Progress(progress)) => {
                     update_progress(&bar, &job, progress);
+                }
+                Ok(CopyWorkerEvent::Retrying {
+                    next_attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                }) => {
+                    bar.progress.set_fraction(0.0);
+                    bar.status.set_text(&format!(
+                        "Retrying {} — attempt {next_attempt}/{max_attempts} in {} ms • {reason}",
+                        job.item_name,
+                        delay.as_millis()
+                    ));
                 }
                 Ok(CopyWorkerEvent::Finished(result)) => {
                     finish_result(&bar, &job, result);

@@ -250,6 +250,15 @@ pub enum ExecutionError {
     },
     /// Streaming bytes between opened backend handles failed.
     Stream(String),
+    /// Removing an operation-owned partial destination failed after another
+    /// execution failure. The destination state is therefore ambiguous and
+    /// must not be retried automatically.
+    Cleanup {
+        /// Original execution failure text.
+        original: String,
+        /// Cleanup failure returned by the destination backend.
+        cleanup: BackendError,
+    },
     /// Destination size did not match the number of bytes copied.
     SizeMismatch {
         /// Bytes reported copied by the stream operation.
@@ -281,6 +290,10 @@ impl fmt::Display for ExecutionError {
                 write!(f, "destination already exists: {}", path.as_str())
             }
             Self::Stream(message) => write!(f, "streaming copy failed: {message}"),
+            Self::Cleanup { original, cleanup } => write!(
+                f,
+                "transfer failed ({original}) and partial-destination cleanup failed ({cleanup})"
+            ),
             Self::SizeMismatch {
                 copied,
                 destination,

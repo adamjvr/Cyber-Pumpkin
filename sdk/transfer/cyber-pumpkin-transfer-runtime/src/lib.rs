@@ -9,9 +9,120 @@ use cyber_pumpkin_reliability::{
     ReliabilityError, ReliableTreeOutcome, ReliableTreeReport, execute_tree_reliable,
 };
 use cyber_pumpkin_transfer::{
-    CancellationToken, Endpoint, TransferId, TransferSpec, TreeTransferProgress, TreeTransferReport,
+    CancellationToken, Endpoint, ExecutionError, RecursiveError, TransferId, TransferSpec,
+    TreeTransferProgress, TreeTransferReport,
 };
 use std::fmt;
+use std::time::Duration;
+
+const MAX_RETRY_ATTEMPTS: u8 = 5;
+
+/// Bounded retry policy for transient transfer failures.
+///
+/// `max_attempts` includes the initial attempt. A default policy therefore
+/// performs at most three total attempts with 250 ms and 500 ms backoffs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetryPolicy {
+    max_attempts: u8,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+}
+
+impl RetryPolicy {
+    /// Creates a bounded retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetryPolicyError`] when the attempt count is outside 1..=5,
+    /// the initial backoff is zero, or the maximum backoff is smaller than the
+    /// initial backoff.
+    pub const fn new(
+        max_attempts: u8,
+        initial_backoff_ms: u64,
+        max_backoff_ms: u64,
+    ) -> Result<Self, RetryPolicyError> {
+        if max_attempts == 0 || max_attempts > MAX_RETRY_ATTEMPTS {
+            return Err(RetryPolicyError::InvalidAttempts(max_attempts));
+        }
+        if initial_backoff_ms == 0 || max_backoff_ms < initial_backoff_ms {
+            return Err(RetryPolicyError::InvalidBackoff {
+                initial_ms: initial_backoff_ms,
+                maximum_ms: max_backoff_ms,
+            });
+        }
+        Ok(Self {
+            max_attempts,
+            initial_backoff_ms,
+            max_backoff_ms,
+        })
+    }
+
+    /// Maximum total attempts including the first attempt.
+    #[must_use]
+    pub const fn max_attempts(self) -> u8 {
+        self.max_attempts
+    }
+
+    /// Returns whether another attempt is allowed after `failed_attempt`.
+    #[must_use]
+    pub const fn allows_retry_after(self, failed_attempt: u8) -> bool {
+        failed_attempt < self.max_attempts
+    }
+
+    /// Computes capped exponential backoff after one failed attempt.
+    #[must_use]
+    pub fn backoff_after(self, failed_attempt: u8) -> Duration {
+        let mut delay = self.initial_backoff_ms;
+        for _ in 1..failed_attempt {
+            delay = delay.saturating_mul(2).min(self.max_backoff_ms);
+        }
+        Duration::from_millis(delay.min(self.max_backoff_ms))
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff_ms: 250,
+            max_backoff_ms: 2_000,
+        }
+    }
+}
+
+/// Retry-policy validation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryPolicyError {
+    /// Attempt count must remain within the product safety bound.
+    InvalidAttempts(u8),
+    /// Backoff values are inconsistent.
+    InvalidBackoff {
+        /// Initial delay in milliseconds.
+        initial_ms: u64,
+        /// Maximum delay in milliseconds.
+        maximum_ms: u64,
+    },
+}
+
+impl fmt::Display for RetryPolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAttempts(attempts) => write!(
+                formatter,
+                "retry attempts must be between 1 and {MAX_RETRY_ATTEMPTS}, got {attempts}"
+            ),
+            Self::InvalidBackoff {
+                initial_ms,
+                maximum_ms,
+            } => write!(
+                formatter,
+                "retry backoff requires non-zero initial delay <= maximum delay, got {initial_ms} ms / {maximum_ms} ms"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RetryPolicyError {}
 
 /// Existing-destination behavior for a copy operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -248,11 +359,68 @@ pub const fn retryable_error_kind(kind: ErrorKind) -> bool {
     )
 }
 
+/// Returns whether a completed copy attempt failed in a state that is safe and
+/// useful to retry after reconnecting both endpoints.
+///
+/// Recovery failures and cleanup failures are intentionally non-retryable. The
+/// retry loop must never continue when the previous attempt may have left an
+/// ambiguous destination state.
+#[must_use]
+pub fn retryable_copy_error(error: &CopyRuntimeError) -> bool {
+    match error {
+        CopyRuntimeError::Backend(error) => retryable_error_kind(error.kind()),
+        CopyRuntimeError::Reliability(error) => retryable_reliability_error(error),
+        CopyRuntimeError::DestinationExists(_) | CopyRuntimeError::KeepBothExhausted(_) => false,
+    }
+}
+
+fn retryable_reliability_error(error: &ReliabilityError) -> bool {
+    match error {
+        ReliabilityError::Transfer(error) => retryable_execution_error(error),
+        ReliabilityError::Recursive(error) => retryable_recursive_error(error),
+        ReliabilityError::Backend(error) => retryable_error_kind(error.kind()),
+        ReliabilityError::AtomicRenameUnsupported
+        | ReliabilityError::SidecarCollision { .. }
+        | ReliabilityError::RecoveryJournal { .. }
+        | ReliabilityError::RecoveryFailed { .. }
+        | ReliabilityError::BackupCleanupFailed { .. } => false,
+    }
+}
+
+fn retryable_recursive_error(error: &RecursiveError) -> bool {
+    match error {
+        RecursiveError::Execution(error) => retryable_execution_error(error),
+        RecursiveError::Backend(error) => retryable_error_kind(error.kind()),
+        RecursiveError::DestinationExists(_)
+        | RecursiveError::UnsupportedEntry { .. }
+        | RecursiveError::InvalidChildPath(_)
+        | RecursiveError::Cleanup(_) => false,
+    }
+}
+
+fn retryable_execution_error(error: &ExecutionError) -> bool {
+    match error {
+        ExecutionError::Backend(error) => retryable_error_kind(error.kind()),
+        ExecutionError::Stream(_) => true,
+        ExecutionError::Lifecycle(_)
+        | ExecutionError::Cleanup { .. }
+        | ExecutionError::BackendMismatch { .. }
+        | ExecutionError::SourceNotFile { .. }
+        | ExecutionError::DestinationExists { .. }
+        | ExecutionError::SizeMismatch { .. } => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CopyConflictPolicy, CopyRequest, CopyRuntimeOutcome, execute_copy};
+    use super::{
+        CopyConflictPolicy, CopyRequest, CopyRuntimeError, CopyRuntimeOutcome, RetryPolicy,
+        execute_copy, retryable_copy_error,
+    };
+    use cyber_pumpkin_backend::{BackendError, ErrorKind};
     use cyber_pumpkin_core::{BackendId, BackendPath};
     use cyber_pumpkin_local::LocalBackend;
+    use cyber_pumpkin_reliability::ReliabilityError;
     use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -290,6 +458,58 @@ mod tests {
             },
             conflict_policy: policy,
         })
+    }
+
+    #[test]
+    fn default_retry_policy_is_bounded_exponential() {
+        let policy = RetryPolicy::default();
+        assert_eq!(policy.max_attempts(), 3);
+        assert!(policy.allows_retry_after(1));
+        assert!(policy.allows_retry_after(2));
+        assert!(!policy.allows_retry_after(3));
+        assert_eq!(policy.backoff_after(1).as_millis(), 250);
+        assert_eq!(policy.backoff_after(2).as_millis(), 500);
+    }
+
+    #[test]
+    fn retry_policy_rejects_retry_storm_configuration() {
+        assert!(RetryPolicy::new(0, 250, 2_000).is_err());
+        assert!(RetryPolicy::new(6, 250, 2_000).is_err());
+        assert!(RetryPolicy::new(3, 0, 2_000).is_err());
+        assert!(RetryPolicy::new(3, 2_000, 250).is_err());
+    }
+
+    #[test]
+    fn retry_classification_excludes_permission_and_conflict_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let transport = CopyRuntimeError::Backend(BackendError::new(
+            ErrorKind::Transport,
+            "test transport",
+            None,
+            "connection reset",
+        ));
+        let permission = CopyRuntimeError::Backend(BackendError::new(
+            ErrorKind::PermissionDenied,
+            "test permission",
+            None,
+            "denied",
+        ));
+        let conflict = CopyRuntimeError::DestinationExists(BackendPath::new("/tmp/existing")?);
+
+        assert!(retryable_copy_error(&transport));
+        assert!(!retryable_copy_error(&permission));
+        assert!(!retryable_copy_error(&conflict));
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_journal_errors_are_never_retryable() {
+        let error = CopyRuntimeError::Reliability(ReliabilityError::RecoveryJournal {
+            path: PathBuf::from("/tmp/cyber-pumpkin-recovery.json"),
+            message: "journal unavailable".to_owned(),
+        });
+
+        assert!(!retryable_copy_error(&error));
     }
 
     #[test]

@@ -182,7 +182,12 @@ where
     drop(writer);
     drop(reader);
 
-    match stream_result? {
+    let stream_outcome = match stream_result {
+        Ok(outcome) => outcome,
+        Err(error) => return Err(cleanup_after_failure(job, destination, error)),
+    };
+
+    match stream_outcome {
         StreamOutcome::Cancelled(bytes_copied) => {
             cleanup_partial_destination(job, destination)?;
             job.transition(TransferState::Cancelled)?;
@@ -190,14 +195,20 @@ where
         }
         StreamOutcome::Completed(bytes_copied) => {
             job.transition(TransferState::Verifying)?;
-            let destination_entry = destination.stat(&job.spec().destination.path)?;
+            let destination_entry = match destination.stat(&job.spec().destination.path) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    return Err(cleanup_after_failure(job, destination, error.into()));
+                }
+            };
             if let Some(destination_size) = destination_entry.size
                 && destination_size != bytes_copied
             {
-                return Err(ExecutionError::SizeMismatch {
+                let error = ExecutionError::SizeMismatch {
                     copied: bytes_copied,
                     destination: destination_size,
-                });
+                };
+                return Err(cleanup_after_failure(job, destination, error));
             }
 
             job.transition(TransferState::Completed)?;
@@ -254,14 +265,28 @@ where
     Ok(StreamOutcome::Completed(bytes_copied))
 }
 
+fn cleanup_after_failure(
+    job: &TransferJob,
+    destination: &dyn Backend,
+    original: ExecutionError,
+) -> ExecutionError {
+    match cleanup_partial_destination(job, destination) {
+        Ok(()) => original,
+        Err(cleanup) => ExecutionError::Cleanup {
+            original: original.to_string(),
+            cleanup,
+        },
+    }
+}
+
 fn cleanup_partial_destination(
     job: &TransferJob,
     destination: &dyn Backend,
-) -> Result<(), ExecutionError> {
+) -> Result<(), cyber_pumpkin_backend::BackendError> {
     match destination.remove(&job.spec().destination.path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     }
 }
 
