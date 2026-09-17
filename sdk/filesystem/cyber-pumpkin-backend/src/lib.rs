@@ -164,6 +164,18 @@ pub trait Backend {
     /// Returns [`BackendError`] when the entry cannot be removed.
     fn remove(&self, path: &BackendPath) -> Result<(), BackendError>;
 
+    /// Returns object creation/birth time as Unix seconds when available.
+    ///
+    /// Backends and filesystems that do not expose a stable creation time return
+    /// `None`; consumers must not substitute modification time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] when metadata lookup itself fails.
+    fn created_time(&self, _path: &BackendPath) -> Result<Option<u64>, BackendError> {
+        Ok(None)
+    }
+
     /// Returns a POSIX-compatible mode when the backend exposes one.
     ///
     /// # Errors

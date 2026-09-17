@@ -3,8 +3,10 @@ use crate::connection::PaneConnection;
 use cyber_pumpkin_core::{EntryKind, FileEntry};
 use gtk::Orientation;
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
 
 const PERMISSION_BITS: [u32; 9] = [
     0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
@@ -14,6 +16,17 @@ const PERMISSION_BITS: [u32; 9] = [
 struct InspectorSelection {
     entry: FileEntry,
     connection: PaneConnection,
+}
+
+struct InspectorMetadataResult {
+    created: Result<Option<u64>, String>,
+    unix_mode: Result<Option<u32>, String>,
+    permissions_supported: bool,
+}
+
+struct PermissionApplyResult {
+    unix_mode: Result<Option<u32>, String>,
+    permissions_supported: bool,
 }
 
 #[derive(Clone)]
@@ -73,10 +86,12 @@ pub(crate) struct InspectorPane {
     kind: gtk::Label,
     size: gtk::Label,
     modified: gtk::Label,
+    created: gtk::Label,
     backend: gtk::Label,
     path: gtk::Label,
     permissions: PermissionEditor,
     selection: Rc<RefCell<Option<InspectorSelection>>>,
+    generation: Rc<Cell<u64>>,
 }
 
 impl InspectorPane {
@@ -126,6 +141,7 @@ impl InspectorPane {
         let kind = value_label("—");
         let size = value_label("—");
         let modified = value_label("—");
+        let created = value_label("—");
         let backend = value_label("—");
         let path = value_label("—");
         path.set_wrap(true);
@@ -134,6 +150,7 @@ impl InspectorPane {
         metadata.append(&detail_row("Kind", &kind));
         metadata.append(&detail_row("Size", &size));
         metadata.append(&detail_row("Modified", &modified));
+        metadata.append(&detail_row("Created", &created));
         metadata.append(&detail_row("Location", &backend));
         metadata.append(&gtk::Separator::new(Orientation::Horizontal));
         metadata.append(&section_label("Path"));
@@ -145,7 +162,8 @@ impl InspectorPane {
         root.append(&permission_box);
 
         let selection = Rc::new(RefCell::new(None));
-        connect_permission_actions(&permissions, &selection);
+        let generation = Rc::new(Cell::new(0));
+        connect_permission_actions(&permissions, &created, &selection, &generation);
         permissions.set_available(false);
 
         Self {
@@ -155,10 +173,12 @@ impl InspectorPane {
             kind,
             size,
             modified,
+            created,
             backend,
             path,
             permissions,
             selection,
+            generation,
         }
     }
 
@@ -168,12 +188,14 @@ impl InspectorPane {
         backend: &str,
         connection: PaneConnection,
     ) {
+        self.generation.set(self.generation.get().wrapping_add(1));
         let Some(entry) = entry else {
             self.icon.set_icon_name(Some("folder-symbolic"));
             self.name.set_text("No Selection");
             self.kind.set_text("—");
             self.size.set_text("—");
             self.modified.set_text("—");
+            self.created.set_text("—");
             self.backend.set_text(backend);
             self.path.set_text("—");
             *self.selection.borrow_mut() = None;
@@ -186,20 +208,27 @@ impl InspectorPane {
         self.kind.set_text(kind_text(entry.kind));
         self.size.set_text(&format_size(entry.size));
         self.modified.set_text(&format_modified(entry.modified));
+        self.created.set_text("Loading…");
         self.backend.set_text(backend);
         self.path.set_text(entry.path.as_str());
         *self.selection.borrow_mut() = Some(InspectorSelection { entry, connection });
         self.permissions.set_available(true);
         self.permissions.octal.set_text("");
-        self.permissions
-            .status
-            .set_text("Load permissions to inspect or edit the selected item.");
+        self.permissions.status.set_text("Loading metadata…");
+        load_metadata_async(
+            &self.permissions,
+            &self.created,
+            &self.selection,
+            &self.generation,
+        );
     }
 }
 
 fn connect_permission_actions(
     editor: &PermissionEditor,
+    created: &gtk::Label,
     selection: &Rc<RefCell<Option<InspectorSelection>>>,
+    generation: &Rc<Cell<u64>>,
 ) {
     for check in &editor.checks {
         let editor = editor.clone();
@@ -212,42 +241,109 @@ fn connect_permission_actions(
 
     {
         let editor = editor.clone();
+        let created = created.clone();
         let selection = Rc::clone(selection);
+        let generation = Rc::clone(generation);
         editor.load.clone().connect_clicked(move |_| {
-            load_permissions(&editor, &selection);
+            load_metadata_async(&editor, &created, &selection, &generation);
         });
     }
     {
         let editor = editor.clone();
         let selection = Rc::clone(selection);
+        let generation = Rc::clone(generation);
         editor.apply.clone().connect_clicked(move |_| {
-            apply_permissions(&editor, &selection);
+            apply_permissions_async(&editor, &selection, &generation);
         });
     }
 }
 
-fn load_permissions(
+fn load_metadata_async(
     editor: &PermissionEditor,
+    created: &gtk::Label,
     selection: &Rc<RefCell<Option<InspectorSelection>>>,
+    generation: &Rc<Cell<u64>>,
 ) {
     let Some(selection) = selection.borrow().clone() else {
         editor.status.set_text("No selected item.");
         return;
     };
-    let backend = match selection.connection.connect_backend() {
-        Ok(backend) => backend,
-        Err(error) => {
-            editor.status.set_text(&format!("Connect failed: {error}"));
-            return;
+    let request_generation = generation.get();
+    editor.load.set_sensitive(false);
+    editor.apply.set_sensitive(false);
+    editor.status.set_text("Loading metadata…");
+
+    let (sender, receiver) = mpsc::channel();
+    let _worker = std::thread::spawn(move || {
+        let result = load_metadata_worker(selection);
+        let _send_result = sender.send(result);
+    });
+
+    let editor = editor.clone();
+    let created = created.clone();
+    let generation = Rc::clone(generation);
+    let _poll = gtk::glib::timeout_add_local(Duration::from_millis(25), move || {
+        match receiver.try_recv() {
+            Ok(result) => {
+                if generation.get() == request_generation {
+                    apply_metadata_result(&editor, &created, result);
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(TryRecvError::Disconnected) => {
+                if generation.get() == request_generation {
+                    editor.set_available(true);
+                    editor
+                        .status
+                        .set_text("Metadata worker stopped unexpectedly.");
+                }
+                gtk::glib::ControlFlow::Break
+            }
         }
-    };
-    if !backend.capabilities().unix_permissions.is_supported() {
+    });
+}
+
+fn load_metadata_worker(selection: InspectorSelection) -> InspectorMetadataResult {
+    let InspectorSelection { entry, connection } = selection;
+    match connection.connect_backend() {
+        Ok(backend) => InspectorMetadataResult {
+            created: backend
+                .created_time(&entry.path)
+                .map_err(|error| error.to_string()),
+            unix_mode: backend
+                .unix_mode(&entry.path)
+                .map_err(|error| error.to_string()),
+            permissions_supported: backend.capabilities().unix_permissions.is_supported(),
+        },
+        Err(error) => InspectorMetadataResult {
+            created: Err(format!("Connect failed: {error}")),
+            unix_mode: Err(format!("Connect failed: {error}")),
+            permissions_supported: false,
+        },
+    }
+}
+
+fn apply_metadata_result(
+    editor: &PermissionEditor,
+    created: &gtk::Label,
+    result: InspectorMetadataResult,
+) {
+    match result.created {
+        Ok(value) => created.set_text(&format_modified(value)),
+        Err(error) => created.set_text(&format!("Unavailable ({error})")),
+    }
+
+    if !result.permissions_supported {
+        editor.set_available(false);
         editor
             .status
             .set_text("This backend does not expose Unix permissions.");
         return;
     }
-    match backend.unix_mode(&selection.entry.path) {
+
+    editor.set_available(true);
+    match result.unix_mode {
         Ok(Some(mode)) => editor.set_mode(mode),
         Ok(None) => editor
             .status
@@ -258,9 +354,10 @@ fn load_permissions(
     }
 }
 
-fn apply_permissions(
+fn apply_permissions_async(
     editor: &PermissionEditor,
     selection: &Rc<RefCell<Option<InspectorSelection>>>,
+    generation: &Rc<Cell<u64>>,
 ) {
     let Some(selection) = selection.borrow().clone() else {
         editor.status.set_text("No selected item.");
@@ -273,26 +370,81 @@ fn apply_permissions(
             return;
         }
     };
-    let backend = match selection.connection.connect_backend() {
+    let request_generation = generation.get();
+    editor.set_available(false);
+    editor.status.set_text("Applying permissions…");
+
+    let (sender, receiver) = mpsc::channel();
+    let _worker = std::thread::spawn(move || {
+        let result = apply_permissions_worker(selection, mode);
+        let _send_result = sender.send(result);
+    });
+
+    let editor = editor.clone();
+    let generation = Rc::clone(generation);
+    let _poll = gtk::glib::timeout_add_local(Duration::from_millis(25), move || {
+        match receiver.try_recv() {
+            Ok(result) => {
+                if generation.get() == request_generation {
+                    apply_permission_result(&editor, mode, result);
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(TryRecvError::Disconnected) => {
+                if generation.get() == request_generation {
+                    editor.set_available(true);
+                    editor
+                        .status
+                        .set_text("Permission worker stopped unexpectedly.");
+                }
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn apply_permissions_worker(selection: InspectorSelection, mode: u32) -> PermissionApplyResult {
+    let InspectorSelection { entry, connection } = selection;
+    let backend = match connection.connect_backend() {
         Ok(backend) => backend,
         Err(error) => {
-            editor.status.set_text(&format!("Connect failed: {error}"));
-            return;
+            return PermissionApplyResult {
+                unix_mode: Err(format!("Connect failed: {error}")),
+                permissions_supported: false,
+            };
         }
     };
     if !backend.capabilities().unix_permissions.is_supported() {
+        return PermissionApplyResult {
+            unix_mode: Ok(None),
+            permissions_supported: false,
+        };
+    }
+    let unix_mode = backend
+        .set_unix_mode(&entry.path, mode)
+        .and_then(|()| backend.unix_mode(&entry.path))
+        .map_err(|error| error.to_string());
+    PermissionApplyResult {
+        unix_mode,
+        permissions_supported: true,
+    }
+}
+
+fn apply_permission_result(
+    editor: &PermissionEditor,
+    requested: u32,
+    result: PermissionApplyResult,
+) {
+    if !result.permissions_supported {
+        editor.set_available(false);
         editor
             .status
             .set_text("This backend does not support Unix permission writes.");
         return;
     }
-    if let Err(error) = backend.set_unix_mode(&selection.entry.path, mode) {
-        editor
-            .status
-            .set_text(&format!("Permission update failed: {error}"));
-        return;
-    }
-    match backend.unix_mode(&selection.entry.path) {
+    editor.set_available(true);
+    match result.unix_mode {
         Ok(Some(applied)) => {
             editor.set_mode(applied);
             editor
@@ -300,11 +452,11 @@ fn apply_permissions(
                 .set_text(&format!("Applied and verified POSIX mode {applied:04o}."));
         }
         Ok(None) => editor.status.set_text(&format!(
-            "Applied POSIX mode {mode:04o}; verification unavailable."
+            "Applied POSIX mode {requested:04o}; verification unavailable."
         )),
-        Err(error) => editor.status.set_text(&format!(
-            "Applied POSIX mode {mode:04o}, but verification failed: {error}"
-        )),
+        Err(error) => editor
+            .status
+            .set_text(&format!("Permission update failed: {error}")),
     }
 }
 

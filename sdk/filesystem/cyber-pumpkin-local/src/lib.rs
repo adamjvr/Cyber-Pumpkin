@@ -172,6 +172,16 @@ impl Backend for LocalBackend {
         }
     }
 
+    fn created_time(&self, path: &BackendPath) -> Result<Option<u64>, BackendError> {
+        let metadata = fs::symlink_metadata(Self::native_path(path))
+            .map_err(|error| Self::io_error("read creation time", path, &error))?;
+        Ok(metadata
+            .created()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs()))
+    }
+
     fn unix_mode(&self, path: &BackendPath) -> Result<Option<u32>, BackendError> {
         let metadata = fs::symlink_metadata(Self::native_path(path))
             .map_err(|error| Self::io_error("read Unix permissions", path, &error))?;
