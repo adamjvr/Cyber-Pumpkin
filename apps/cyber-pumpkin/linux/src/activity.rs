@@ -55,6 +55,24 @@ pub(crate) fn record(
     }
 }
 
+/// Adds a UI-only activity event without persisting it to history.
+///
+/// This is used for live states such as an active Remote Edit watcher. A crash
+/// or restart therefore cannot leave a historical row claiming a dead session
+/// is still active.
+pub(crate) fn record_transient(
+    list: &gtk::ListBox,
+    operation_id: Option<u64>,
+    kind: HistoryKind,
+    state: HistoryState,
+    label: &str,
+    detail: &str,
+) {
+    remove_empty_row(list);
+    let entry = HistoryEntry::new(operation_id, kind, state, label, detail, now_unix_seconds());
+    append_history_row(list, &entry, true);
+}
+
 pub(crate) fn clear(list: &gtk::ListBox) {
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
@@ -111,6 +129,7 @@ fn append_history_row(list: &gtk::ListBox, entry: &HistoryEntry, prepend: bool) 
 
 const fn state_name(state: HistoryState) -> &'static str {
     match state {
+        HistoryState::Active => "Active",
         HistoryState::Completed => "Completed",
         HistoryState::Cancelled => "Cancelled",
         HistoryState::Failed => "Failed",

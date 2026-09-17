@@ -1,12 +1,14 @@
+use crate::activity;
 use crate::browser::PaneHandle;
 use crate::connection::PaneConnection;
 use cyber_pumpkin_application::application_support_directory;
 use cyber_pumpkin_core::{BackendId, EntryKind};
+use cyber_pumpkin_history::{HistoryKind, HistoryState};
 use cyber_pumpkin_local::LocalBackend;
-use cyber_pumpkin_remote_edit::RemoteEditSession;
+use cyber_pumpkin_remote_edit::{RemoteEditError, RemoteEditSession};
 use cyber_pumpkin_remote_edit::{create_session, download_initial, local_changed, upload_changed};
 use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -14,12 +16,87 @@ use std::time::Duration;
 
 static NEXT_REMOTE_EDIT_ID: AtomicU64 = AtomicU64::new(1_000_000);
 static ACTIVE_REMOTE_EDITS: OnceLock<Mutex<BTreeMap<u64, ActiveRemoteEdit>>> = OnceLock::new();
+static REMOTE_EDIT_EVENTS: OnceLock<Mutex<VecDeque<RemoteEditActivityEvent>>> = OnceLock::new();
+const MAX_PENDING_REMOTE_EDIT_EVENTS: usize = 256;
 
 #[derive(Clone)]
 struct ActiveRemoteEdit {
     id: u64,
     path: String,
     cancellation: CancellationToken,
+}
+
+#[derive(Clone, Debug)]
+struct RemoteEditActivityEvent {
+    operation_id: u64,
+    state: HistoryState,
+    label: &'static str,
+    detail: String,
+}
+
+fn remote_edit_event_queue() -> &'static Mutex<VecDeque<RemoteEditActivityEvent>> {
+    REMOTE_EDIT_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn remote_edit_event_queue_guard() -> MutexGuard<'static, VecDeque<RemoteEditActivityEvent>> {
+    match remote_edit_event_queue().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn emit_remote_edit_event(
+    operation_id: u64,
+    state: HistoryState,
+    label: &'static str,
+    detail: impl Into<String>,
+) {
+    let mut events = remote_edit_event_queue_guard();
+    if events.len() >= MAX_PENDING_REMOTE_EDIT_EVENTS {
+        events.pop_front();
+    }
+    events.push_back(RemoteEditActivityEvent {
+        operation_id,
+        state,
+        label,
+        detail: detail.into(),
+    });
+}
+
+fn drain_remote_edit_events() -> Vec<RemoteEditActivityEvent> {
+    remote_edit_event_queue_guard().drain(..).collect()
+}
+
+/// Installs the GTK-main-thread bridge for Remote Edit worker events.
+///
+/// Watcher threads only enqueue plain data. This timer is the sole boundary
+/// that touches GTK widgets and persistent Activity history.
+pub(crate) fn install_activity_bridge(activity_list: &gtk::ListBox) {
+    let activity_list = activity_list.clone();
+    let _activity_source = gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
+        for event in drain_remote_edit_events() {
+            if event.state == HistoryState::Active {
+                activity::record_transient(
+                    &activity_list,
+                    Some(event.operation_id),
+                    HistoryKind::RemoteEdit,
+                    event.state,
+                    event.label,
+                    &event.detail,
+                );
+            } else {
+                activity::record(
+                    &activity_list,
+                    Some(event.operation_id),
+                    HistoryKind::RemoteEdit,
+                    event.state,
+                    event.label,
+                    &event.detail,
+                );
+            }
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 pub(crate) fn edit_selected_remote_file(pane: &PaneHandle) {
@@ -141,6 +218,15 @@ fn stop_remote_edit(id: u64) -> bool {
         return false;
     };
     active.cancellation.cancel();
+    emit_remote_edit_event(
+        id,
+        HistoryState::Cancelled,
+        "Remote Edit Session",
+        format!(
+            "Stopped watcher for {}; local working copy retained.",
+            active.path
+        ),
+    );
     true
 }
 
@@ -149,6 +235,15 @@ fn stop_all_remote_edits() -> usize {
     let count = sessions.len();
     for session in sessions.values() {
         session.cancellation.cancel();
+        emit_remote_edit_event(
+            session.id,
+            HistoryState::Cancelled,
+            "Remote Edit Session",
+            format!(
+                "Stopped watcher for {}; local working copy retained.",
+                session.path
+            ),
+        );
     }
     sessions.clear();
     count
@@ -241,6 +336,16 @@ fn start_remote_edit_watcher(
     session: RemoteEditSession,
 ) {
     let cancellation = register_remote_edit(session.id.get(), session.remote.path.as_str());
+    emit_remote_edit_event(
+        session.id.get(),
+        HistoryState::Active,
+        "Remote Edit Session",
+        format!(
+            "Watching {} (working copy: {}).",
+            session.remote.path.as_str(),
+            session.local.path.as_str()
+        ),
+    );
     let _watcher = std::thread::spawn(move || {
         let local_backend = LocalBackend::new(local_id);
         let mut session = session;
@@ -257,6 +362,12 @@ fn start_remote_edit_watcher(
                 Ok(false) => continue,
                 Ok(true) => {}
                 Err(error) => {
+                    emit_remote_edit_event(
+                        session.id.get(),
+                        HistoryState::Failed,
+                        "Remote Edit Watcher Failed",
+                        format!("{}: {error}", session.remote.path.as_str()),
+                    );
                     eprintln!("remote-edit watcher stopped: {error}");
                     break;
                 }
@@ -282,14 +393,44 @@ fn start_remote_edit_watcher(
                 &cancellation,
             ) {
                 Ok(true) => {
+                    emit_remote_edit_event(
+                        session.id.get(),
+                        HistoryState::Completed,
+                        "Remote Edit Upload",
+                        format!("Uploaded {}.", session.remote.path.as_str()),
+                    );
                     eprintln!("remote-edit uploaded {}", session.remote.path.as_str());
                 }
                 Ok(false) => {}
+                Err(RemoteEditError::RemoteChanged) => {
+                    emit_remote_edit_event(
+                        session.id.get(),
+                        HistoryState::Failed,
+                        "Remote Edit Conflict",
+                        format!(
+                            "Upload refused because {} changed remotely. Local working copy retained at {}.",
+                            session.remote.path.as_str(),
+                            session.local.path.as_str()
+                        ),
+                    );
+                    eprintln!(
+                        "remote-edit conflict for {}: remote content changed",
+                        session.remote.path.as_str()
+                    );
+                    break;
+                }
                 Err(error) => {
                     if cancellation.is_cancelled() {
                         break;
                     }
+                    emit_remote_edit_event(
+                        session.id.get(),
+                        HistoryState::Failed,
+                        "Remote Edit Upload Failed",
+                        format!("{}: {error}", session.remote.path.as_str()),
+                    );
                     eprintln!("remote-edit upload failed: {error}");
+                    break;
                 }
             }
         }

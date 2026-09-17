@@ -22,13 +22,17 @@ pub enum HistoryKind {
     Delete,
     /// Rename/move operation.
     Rename,
+    /// Remote-edit watcher, upload, conflict, or stop event.
+    RemoteEdit,
     /// Other operation not covered by a stable category.
     Other,
 }
 
-/// Terminal state stored in history.
+/// Observable state stored in activity history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum HistoryState {
+    /// Operation or session is currently active.
+    Active,
     /// Operation completed successfully.
     Completed,
     /// Operation was cancelled.
@@ -44,7 +48,7 @@ pub struct HistoryEntry {
     pub operation_id: Option<u64>,
     /// Activity category.
     pub kind: HistoryKind,
-    /// Terminal state.
+    /// Activity state.
     pub state: HistoryState,
     /// Short user-facing label.
     pub label: String,
@@ -187,6 +191,17 @@ mod tests {
                 "Sync",
                 "network failed",
                 123,
+            ),
+            200,
+        );
+        log.append(
+            HistoryEntry::new(
+                Some(10),
+                HistoryKind::RemoteEdit,
+                HistoryState::Active,
+                "Remote Edit Session",
+                "/srv/patch.txt",
+                124,
             ),
             200,
         );
