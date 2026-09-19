@@ -42,6 +42,7 @@ echo "=== CLI SMOKE ==="
 cargo run --quiet -p cpk -- about
 cargo run --quiet -p cpk -- local-ls . >/dev/null
 cargo run --quiet -p cpk -- local-stat Cargo.toml >/dev/null
+cargo run --quiet -p cpk -- preferences-show >/dev/null
 
 echo
 echo "=== FINAL DIFF CHECK ==="

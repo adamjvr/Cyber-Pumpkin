@@ -73,6 +73,63 @@ pub(crate) fn record_transient(
     append_history_row(list, &entry, true);
 }
 
+/// Adds or replaces one keyed UI-only live activity row.
+///
+/// Re-emitting the same operation id updates the live row instead of leaving
+/// stale duplicate activity behind. Keyed live rows are never persisted.
+pub(crate) fn record_transient_keyed(
+    list: &gtk::ListBox,
+    operation_id: u64,
+    kind: HistoryKind,
+    state: HistoryState,
+    label: &str,
+    detail: &str,
+) {
+    remove_transient(list, operation_id);
+    remove_empty_row(list);
+
+    let entry = HistoryEntry::new(
+        Some(operation_id),
+        kind,
+        state,
+        label,
+        detail,
+        now_unix_seconds(),
+    );
+    let id = format!("#{operation_id}");
+    let label = gtk::Label::new(Some(&format!(
+        "{id} • {} • {} • {}",
+        entry.label,
+        state_name(entry.state),
+        entry.detail,
+    )));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_margin_top(4);
+    label.set_margin_bottom(4);
+    label.set_margin_start(8);
+    label.set_margin_end(8);
+
+    let row = gtk::ListBoxRow::new();
+    row.set_widget_name(&format!("cyber-pumpkin-live-{operation_id}"));
+    row.set_selectable(false);
+    row.set_child(Some(&label));
+    list.prepend(&row);
+}
+
+/// Removes one keyed UI-only live row.
+pub(crate) fn remove_transient(list: &gtk::ListBox, operation_id: u64) {
+    let wanted = format!("cyber-pumpkin-live-{operation_id}");
+    let mut index = 0;
+    while let Some(row) = list.row_at_index(index) {
+        if row.widget_name().as_str() == wanted.as_str() {
+            list.remove(&row);
+            return;
+        }
+        index += 1;
+    }
+}
+
 pub(crate) fn clear(list: &gtk::ListBox) {
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);

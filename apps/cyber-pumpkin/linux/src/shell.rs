@@ -748,9 +748,10 @@ fn show_delete_dialog(
 }
 
 fn perform_delete(pane: &PaneHandle, activity_list: &gtk::ListBox) {
-    match pane.delete_selected() {
+    let activity_list = activity_list.clone();
+    pane.delete_selected_async(Rc::new(move |result| match result {
         Ok(name) => activity::record(
-            activity_list,
+            &activity_list,
             None,
             HistoryKind::Delete,
             HistoryState::Completed,
@@ -758,14 +759,14 @@ fn perform_delete(pane: &PaneHandle, activity_list: &gtk::ListBox) {
             "Deleted",
         ),
         Err(error) => activity::record(
-            activity_list,
+            &activity_list,
             None,
             HistoryKind::Delete,
             HistoryState::Failed,
             "Delete",
             &error,
         ),
-    }
+    }));
 }
 
 fn active_pane(context: &ActionContext) -> &PaneHandle {

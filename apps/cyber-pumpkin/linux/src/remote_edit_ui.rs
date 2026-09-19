@@ -76,24 +76,30 @@ pub(crate) fn install_activity_bridge(activity_list: &gtk::ListBox) {
     let _activity_source = gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
         for event in drain_remote_edit_events() {
             if event.state == HistoryState::Active {
-                activity::record_transient(
+                activity::record_transient_keyed(
                     &activity_list,
-                    Some(event.operation_id),
+                    event.operation_id,
                     HistoryKind::RemoteEdit,
                     event.state,
                     event.label,
                     &event.detail,
                 );
-            } else {
-                activity::record(
-                    &activity_list,
-                    Some(event.operation_id),
-                    HistoryKind::RemoteEdit,
-                    event.state,
-                    event.label,
-                    &event.detail,
-                );
+                continue;
             }
+
+            let upload_completed =
+                event.state == HistoryState::Completed && event.label == "Remote Edit Upload";
+            if !upload_completed {
+                activity::remove_transient(&activity_list, event.operation_id);
+            }
+            activity::record(
+                &activity_list,
+                Some(event.operation_id),
+                HistoryKind::RemoteEdit,
+                event.state,
+                event.label,
+                &event.detail,
+            );
         }
         gtk::glib::ControlFlow::Continue
     });

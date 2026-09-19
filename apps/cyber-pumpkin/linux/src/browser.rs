@@ -5,10 +5,13 @@ use cyber_pumpkin_core::{BackendId, BackendPath, EntryKind, FileEntry};
 use cyber_pumpkin_file_ops::remove_tree;
 use gtk::Orientation;
 use gtk::gio;
+use gtk::glib::{self, ControlFlow};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaneSide {
@@ -25,6 +28,7 @@ pub(crate) enum SortMode {
 }
 
 type SelectionObserver = Rc<dyn Fn(Option<FileEntry>, String)>;
+type BackendActionCallback = Rc<dyn Fn(Result<String, String>)>;
 
 #[derive(Clone)]
 struct PaneWidgets {
@@ -42,7 +46,9 @@ pub(crate) struct PaneHandle {
     pub(crate) root: gtk::Box,
     session: Rc<RefCell<PaneSession>>,
     connection: Rc<RefCell<PaneConnection>>,
+    loaded_entries: Rc<RefCell<Vec<FileEntry>>>,
     entries: Rc<RefCell<Vec<FileEntry>>>,
+    load_generation: Rc<Cell<u64>>,
     show_hidden: Rc<Cell<bool>>,
     sort_mode: Rc<Cell<SortMode>>,
     sort_descending: Rc<Cell<bool>>,
@@ -67,7 +73,9 @@ pub(crate) fn build_pane(
     });
     let session = create_session(connection.backend_id(), initial_path);
     let connection = Rc::new(RefCell::new(connection));
+    let loaded_entries = Rc::new(RefCell::new(Vec::new()));
     let entries = Rc::new(RefCell::new(Vec::new()));
+    let load_generation = Rc::new(Cell::new(0));
     let show_hidden = Rc::new(Cell::new(false));
     let sort_mode = Rc::new(Cell::new(SortMode::Name));
     let sort_descending = Rc::new(Cell::new(false));
@@ -79,7 +87,9 @@ pub(crate) fn build_pane(
         root,
         session,
         connection,
+        loaded_entries,
         entries,
+        load_generation,
         show_hidden,
         sort_mode,
         sort_descending,
@@ -97,13 +107,18 @@ impl PaneHandle {
     pub(crate) fn refresh(&self) {
         let current = self.session.borrow().location().clone();
         let connection = self.connection.borrow().clone();
-        match load_directory(&connection, &current) {
-            Ok(loaded) => self.render(loaded),
-            Err(error) => self
-                .widgets
-                .footer
-                .set_text(&format!("Load failed: {error}")),
-        }
+        self.load_directory_async(
+            connection,
+            current,
+            "Loading…",
+            |pane, result| match result {
+                Ok(loaded) => pane.render(loaded),
+                Err(error) => pane
+                    .widgets
+                    .footer
+                    .set_text(&format!("Load failed: {error}")),
+            },
+        );
     }
 
     pub(crate) fn navigate_text(&self, text: &str) {
@@ -118,22 +133,22 @@ impl PaneHandle {
 
     pub(crate) fn set_show_hidden(&self, show: bool) {
         self.show_hidden.set(show);
-        self.refresh();
+        self.render_cached();
     }
 
     pub(crate) fn set_sort_mode(&self, mode: SortMode) {
         self.sort_mode.set(mode);
-        self.refresh();
+        self.render_cached();
     }
 
     pub(crate) fn set_sort_descending(&self, descending: bool) {
         self.sort_descending.set(descending);
-        self.refresh();
+        self.render_cached();
     }
 
     pub(crate) fn set_filter_query(&self, query: &str) {
         *self.filter_query.borrow_mut() = query.trim().to_lowercase();
-        self.refresh();
+        self.render_cached();
     }
 
     pub(crate) fn selected_entry(&self) -> Option<FileEntry> {
@@ -168,7 +183,8 @@ impl PaneHandle {
         }
     }
 
-    pub(crate) fn connect_sftp_with_auth(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect_sftp_with_auth_async(
         &self,
         host: &str,
         username: &str,
@@ -176,31 +192,59 @@ impl PaneHandle {
         path: &str,
         auth: PaneSftpAuth,
         trusted_fingerprint: Option<String>,
-    ) -> Result<(), String> {
+        on_complete: Rc<dyn Fn(Result<(), String>)>,
+    ) {
         let id = self.backend_id();
-        let connection =
-            PaneConnection::sftp(id.as_str(), host, username, port, auth, trusted_fingerprint)?;
-        let target = BackendPath::new(path).map_err(|error| error.to_string())?;
-        let loaded = load_directory(&connection, &target)?;
-        *self.connection.borrow_mut() = connection;
-        *self.session.borrow_mut() = PaneSession::new(self.backend_id(), target);
-        self.widgets.heading.set_text(&format!(
-            "SFTP — {}",
-            self.connection.borrow().display_name()
-        ));
-        self.render(loaded);
-        Ok(())
+        let connection = match PaneConnection::sftp(
+            id.as_str(),
+            host,
+            username,
+            port,
+            auth,
+            trusted_fingerprint,
+        ) {
+            Ok(connection) => connection,
+            Err(error) => {
+                on_complete(Err(error));
+                return;
+            }
+        };
+        let target = match BackendPath::new(path) {
+            Ok(target) => target,
+            Err(error) => {
+                on_complete(Err(error.to_string()));
+                return;
+            }
+        };
+
+        let committed_connection = connection.clone();
+        let committed_target = target.clone();
+        self.load_directory_async(connection, target, "Connecting…", move |pane, result| {
+            match result {
+                Ok(loaded) => {
+                    *pane.connection.borrow_mut() = committed_connection.clone();
+                    *pane.session.borrow_mut() =
+                        PaneSession::new(pane.backend_id(), committed_target.clone());
+                    pane.widgets.heading.set_text(&format!(
+                        "SFTP — {}",
+                        pane.connection.borrow().display_name()
+                    ));
+                    pane.render(loaded);
+                    on_complete(Ok(()));
+                }
+                Err(error) => on_complete(Err(error)),
+            }
+        });
     }
 
     pub(crate) fn disconnect_to_local(&self, path: &str) -> Result<(), String> {
         let id = self.backend_id();
         let connection = PaneConnection::local(id.as_str())?;
         let target = BackendPath::new(path).map_err(|error| error.to_string())?;
-        let loaded = load_directory(&connection, &target)?;
         *self.connection.borrow_mut() = connection;
         *self.session.borrow_mut() = PaneSession::new(self.backend_id(), target);
         self.widgets.heading.set_text("Local");
-        self.render(loaded);
+        self.refresh();
         Ok(())
     }
 
@@ -221,25 +265,20 @@ impl PaneHandle {
             self.widgets.footer.set_text("Could not form folder path.");
             return;
         };
-        let backend = match self.connection.borrow().connect_backend() {
-            Ok(backend) => backend,
-            Err(error) => {
-                self.widgets
-                    .footer
-                    .set_text(&format!("Connect failed: {error}"));
-                return;
-            }
-        };
-        match backend.create_dir(&path) {
-            Ok(()) => {
-                self.widgets.footer.set_text(&format!("Created {name}"));
-                self.refresh();
-            }
-            Err(error) => self
-                .widgets
-                .footer
-                .set_text(&format!("Create failed: {error}")),
-        }
+        let connection = self.connection();
+        let name = name.to_owned();
+        self.run_backend_action(
+            &format!("Creating {name}…"),
+            move || {
+                let backend = connection.connect_backend()?;
+                backend
+                    .create_dir(&path)
+                    .map_err(|error| error.to_string())?;
+                Ok(format!("Created {name}"))
+            },
+            true,
+            None,
+        );
     }
 
     pub(crate) fn rename_selected(&self, new_name: &str) {
@@ -257,58 +296,52 @@ impl PaneHandle {
                 .set_text("Could not form destination path.");
             return;
         };
-        let backend = match self.connection.borrow().connect_backend() {
-            Ok(backend) => backend,
-            Err(error) => {
-                self.widgets
-                    .footer
-                    .set_text(&format!("Connect failed: {error}"));
-                return;
-            }
-        };
-        match backend.rename(&entry.path, &destination) {
-            Ok(()) => {
-                self.widgets
-                    .footer
-                    .set_text(&format!("Renamed {} → {new_name}", entry.name));
-                self.refresh();
-            }
-            Err(error) => self
-                .widgets
-                .footer
-                .set_text(&format!("Rename failed: {error}")),
-        }
+        let connection = self.connection();
+        let new_name = new_name.to_owned();
+        let old_name = entry.name.clone();
+        self.run_backend_action(
+            &format!("Renaming {old_name}…"),
+            move || {
+                let backend = connection.connect_backend()?;
+                backend
+                    .rename(&entry.path, &destination)
+                    .map_err(|error| error.to_string())?;
+                Ok(format!("Renamed {old_name} → {new_name}"))
+            },
+            true,
+            None,
+        );
     }
 
-    pub(crate) fn delete_selected(&self) -> Result<String, String> {
+    pub(crate) fn delete_selected_async(&self, on_complete: Rc<dyn Fn(Result<String, String>)>) {
         let Some(entry) = self.selected_entry() else {
             let message = "Select an item to delete.".to_owned();
             self.widgets.footer.set_text(&message);
-            return Err(message);
+            on_complete(Err(message));
+            return;
         };
-        let backend = self
-            .connection
-            .borrow()
-            .connect_backend()
-            .map_err(|error| {
-                self.widgets
-                    .footer
-                    .set_text(&format!("Connect failed: {error}"));
-                error
-            })?;
-        let report = remove_tree(backend.as_ref(), &entry.path).map_err(|error| {
-            let message = format!("Delete failed: {error}");
-            self.widgets.footer.set_text(&message);
-            message
-        })?;
-
-        self.widgets.footer.set_text(&format!(
-            "Deleted {} • {} entries",
-            entry.name,
-            report.entries_removed()
-        ));
-        self.refresh();
-        Ok(entry.name)
+        let connection = self.connection();
+        let name = entry.name.clone();
+        let work_name = name.clone();
+        let result_name = name.clone();
+        let callback = on_complete;
+        self.run_backend_action(
+            &format!("Deleting {name}…"),
+            move || {
+                let backend = connection.connect_backend()?;
+                let report = remove_tree(backend.as_ref(), &entry.path)
+                    .map_err(|error| error.to_string())?;
+                Ok(format!(
+                    "Deleted {work_name} • {} entries",
+                    report.entries_removed()
+                ))
+            },
+            true,
+            Some(Rc::new(move |result| match result {
+                Ok(_) => callback(Ok(result_name.clone())),
+                Err(error) => callback(Err(error)),
+            })),
+        );
     }
 
     pub(crate) fn selected_name(&self) -> Option<String> {
@@ -435,41 +468,69 @@ impl PaneHandle {
     }
 
     fn navigate_to(&self, target: BackendPath) {
-        let connection = self.connection.borrow().clone();
-        match load_directory(&connection, &target) {
-            Ok(loaded) => {
-                self.session.borrow_mut().navigate_to(target);
-                self.render(loaded);
-            }
-            Err(error) => self
-                .widgets
-                .footer
-                .set_text(&format!("Navigation failed: {error}")),
-        }
+        let connection = self.connection();
+        let committed_target = target.clone();
+        self.load_directory_async(
+            connection,
+            target,
+            "Loading…",
+            move |pane, result| match result {
+                Ok(loaded) => {
+                    pane.session
+                        .borrow_mut()
+                        .navigate_to(committed_target.clone());
+                    pane.render(loaded);
+                }
+                Err(error) => pane
+                    .widgets
+                    .footer
+                    .set_text(&format!("Navigation failed: {error}")),
+            },
+        );
     }
 
     fn go_back(&self) {
         let Some(target) = self.session.borrow().back_location().cloned() else {
             return;
         };
-        let connection = self.connection.borrow().clone();
-        let Ok(loaded) = load_directory(&connection, &target) else {
-            return;
-        };
-        let _changed = self.session.borrow_mut().go_back();
-        self.render(loaded);
+        let connection = self.connection();
+        self.load_directory_async(
+            connection,
+            target,
+            "Loading…",
+            |pane, result| match result {
+                Ok(loaded) => {
+                    let _changed = pane.session.borrow_mut().go_back();
+                    pane.render(loaded);
+                }
+                Err(error) => pane
+                    .widgets
+                    .footer
+                    .set_text(&format!("Back navigation failed: {error}")),
+            },
+        );
     }
 
     fn go_forward(&self) {
         let Some(target) = self.session.borrow().forward_location().cloned() else {
             return;
         };
-        let connection = self.connection.borrow().clone();
-        let Ok(loaded) = load_directory(&connection, &target) else {
-            return;
-        };
-        let _changed = self.session.borrow_mut().go_forward();
-        self.render(loaded);
+        let connection = self.connection();
+        self.load_directory_async(
+            connection,
+            target,
+            "Loading…",
+            |pane, result| match result {
+                Ok(loaded) => {
+                    let _changed = pane.session.borrow_mut().go_forward();
+                    pane.render(loaded);
+                }
+                Err(error) => pane
+                    .widgets
+                    .footer
+                    .set_text(&format!("Forward navigation failed: {error}")),
+            },
+        );
     }
 
     fn go_up(&self) {
@@ -484,18 +545,26 @@ impl PaneHandle {
     }
 
     fn render(&self, loaded: Vec<FileEntry>) {
+        *self.loaded_entries.borrow_mut() = loaded;
+        self.render_cached();
+    }
+
+    fn render_cached(&self) {
         while let Some(row) = self.widgets.list.row_at_index(0) {
             self.widgets.list.remove(&row);
         }
 
         let show_hidden = self.show_hidden.get();
         let filter_query = self.filter_query.borrow().clone();
-        let mut visible: Vec<FileEntry> = loaded
-            .into_iter()
+        let mut visible: Vec<FileEntry> = self
+            .loaded_entries
+            .borrow()
+            .iter()
             .filter(|entry| show_hidden || !entry.name.starts_with('.'))
             .filter(|entry| {
                 filter_query.is_empty() || entry.name.to_lowercase().contains(&filter_query)
             })
+            .cloned()
             .collect();
         sort_entries(
             &mut visible,
@@ -513,6 +582,88 @@ impl PaneHandle {
         self.update_navigation_widgets();
         self.update_footer();
         self.notify_selection(None);
+    }
+
+    fn load_directory_async<F>(
+        &self,
+        connection: PaneConnection,
+        target: BackendPath,
+        status: &str,
+        on_complete: F,
+    ) where
+        F: Fn(&PaneHandle, Result<Vec<FileEntry>, String>) + 'static,
+    {
+        let generation = self.load_generation.get().wrapping_add(1);
+        self.load_generation.set(generation);
+        self.widgets.footer.set_text(status);
+        let (sender, receiver) = mpsc::channel();
+        let _worker = std::thread::spawn(move || {
+            let _sent = sender.send(load_directory(&connection, &target));
+        });
+
+        let pane = self.clone();
+        glib::timeout_add_local(Duration::from_millis(25), move || {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    if pane.load_generation.get() == generation {
+                        on_complete(&pane, result);
+                    }
+                    ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => {
+                    if pane.load_generation.get() == generation {
+                        on_complete(&pane, Err("directory worker disconnected".to_owned()));
+                    }
+                    ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    fn run_backend_action<F>(
+        &self,
+        status: &str,
+        work: F,
+        refresh_after: bool,
+        callback: Option<BackendActionCallback>,
+    ) where
+        F: FnOnce() -> Result<String, String> + Send + 'static,
+    {
+        self.widgets.footer.set_text(status);
+        let (sender, receiver) = mpsc::channel();
+        let _worker = std::thread::spawn(move || {
+            let _sent = sender.send(work());
+        });
+        let pane = self.clone();
+        glib::timeout_add_local(Duration::from_millis(25), move || {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    match &result {
+                        Ok(message) => pane.widgets.footer.set_text(message),
+                        Err(error) => pane.widgets.footer.set_text(error),
+                    }
+                    if result.is_ok() && refresh_after {
+                        pane.refresh();
+                    }
+                    if let Some(callback) = callback.as_ref() {
+                        callback(result);
+                    }
+                    ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => {
+                    let error = Err("filesystem worker disconnected".to_owned());
+                    pane.widgets
+                        .footer
+                        .set_text("Filesystem worker disconnected.");
+                    if let Some(callback) = callback.as_ref() {
+                        callback(error);
+                    }
+                    ControlFlow::Break
+                }
+            }
+        });
     }
 
     fn update_navigation_widgets(&self) {

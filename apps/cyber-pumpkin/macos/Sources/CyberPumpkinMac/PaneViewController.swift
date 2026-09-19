@@ -37,6 +37,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     private var visibleEntries: [CPKEntry] = []
     private var sortMode: PaneSortMode = .name
     private var sortDescending = false
+    private var loadGeneration: UInt64 = 0
     private let pathField = NSTextField()
     private let tableView = ContextTableView()
     private let footer = NSTextField(labelWithString: "0 items")
@@ -99,42 +100,66 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     func reloadDirectory() {
-        do {
-            allEntries = try client.list(connection: connection, path: currentPath)
-            applyFilterAndSort()
-            pathField.stringValue = currentPath
-            heading.stringValue =
-                connection == .local ? titleText : connection.displayName
-            onSelectionChanged?(nil, connection)
-        } catch {
-            footer.stringValue = "Load failed: \(error.localizedDescription)"
-        }
+        loadDirectory(
+            connection: connection,
+            path: currentPath,
+            status: "Loading…",
+            commit: nil
+        )
     }
 
-    func connectSFTP(_ remote: SFTPConnection, path: String) throws {
-        let entries = try client.list(connection: .sftp(remote), path: path)
-        connection = .sftp(remote)
-        currentPath = path
-        allEntries = entries
-        pathField.stringValue = currentPath
-        heading.stringValue = connection.displayName
-        applyFilterAndSort()
-        onSelectionChanged?(nil, connection)
-        onBecameActive?()
+    func connectSFTP(
+        _ remote: SFTPConnection,
+        path: String,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        let candidate: BrowserConnection = .sftp(remote)
+        loadDirectory(
+            connection: candidate,
+            path: path,
+            status: "Connecting \(remote.displayName)…",
+            commit: { [weak self] in
+                guard let self else { return }
+                self.connection = candidate
+                self.currentPath = path
+                self.heading.stringValue = candidate.displayName
+                self.pathField.stringValue = path
+                self.onBecameActive?()
+            },
+            completion: completion
+        )
     }
 
     func disconnectToLocal(path: String) {
-        connection = .local
-        currentPath = path
-        heading.stringValue = titleText
-        reloadDirectory()
-        onBecameActive?()
+        let candidate: BrowserConnection = .local
+        loadDirectory(
+            connection: candidate,
+            path: path,
+            status: "Loading…",
+            commit: { [weak self] in
+                guard let self else { return }
+                self.connection = candidate
+                self.currentPath = path
+                self.heading.stringValue = self.titleText
+                self.pathField.stringValue = path
+                self.onBecameActive?()
+            }
+        )
     }
 
     func navigate(to path: String) {
-        currentPath = path
-        reloadDirectory()
-        onBecameActive?()
+        let candidate = connection
+        loadDirectory(
+            connection: candidate,
+            path: path,
+            status: "Loading…",
+            commit: { [weak self] in
+                guard let self else { return }
+                self.currentPath = path
+                self.pathField.stringValue = path
+                self.onBecameActive?()
+            }
+        )
     }
 
     func selectedEntry() -> CPKEntry? {
@@ -159,6 +184,43 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         tableView.menu = menu
     }
 
+    private func loadDirectory(
+        connection requestedConnection: BrowserConnection,
+        path requestedPath: String,
+        status: String,
+        commit: (() -> Void)?,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        footer.stringValue = status
+        let client = client
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result {
+                try client.list(connection: requestedConnection, path: requestedPath)
+            }
+            DispatchQueue.main.async {
+                guard let self, self.loadGeneration == generation else { return }
+                switch result {
+                case .success(let entries):
+                    commit?()
+                    self.allEntries = entries
+                    self.pathField.stringValue = self.currentPath
+                    self.heading.stringValue = self.connection == .local
+                        ? self.titleText
+                        : self.connection.displayName
+                    self.applyFilterAndSort()
+                    self.onSelectionChanged?(nil, self.connection)
+                    completion?(.success(()))
+                case .failure(let error):
+                    self.footer.stringValue = "Load failed: \(error.localizedDescription)"
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
     private func applyFilterAndSort() {
         visibleEntries = showHidden
             ? allEntries
@@ -170,9 +232,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         }
 
         tableView.reloadData()
-        let order = sortDescending ? "descending" : "ascending"
-        footer.stringValue =
-            "\(visibleEntries.count) items • \(sortMode.rawValue) \(order)"
+        updateFooter()
     }
 
     private func entryComesBefore(_ left: CPKEntry, _ right: CPKEntry) -> Bool {
@@ -255,8 +315,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
             return
         }
 
-        footer.stringValue =
-            "\(entry.name) selected • \(formatSize(entry.size))"
+        footer.stringValue = "\(entry.name) selected • \(formatSize(entry.size))"
         onSelectionChanged?(entry, connection)
     }
 
@@ -282,8 +341,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private func updateFooter() {
         let order = sortDescending ? "descending" : "ascending"
-        footer.stringValue =
-            "\(visibleEntries.count) items • \(sortMode.rawValue) \(order)"
+        footer.stringValue = "\(visibleEntries.count) items • \(sortMode.rawValue) \(order)"
     }
 
     func formatSize(_ size: UInt64?) -> String {
@@ -301,6 +359,7 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         return "\(bytes / 1_073_741_824) GiB"
     }
+
     func formatDate(_ modified: UInt64?) -> String {
         guard let modified else { return "—" }
         let date = Date(timeIntervalSince1970: TimeInterval(modified))
@@ -309,5 +368,4 @@ final class PaneViewController: NSViewController, NSTableViewDataSource, NSTable
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }
-
 }

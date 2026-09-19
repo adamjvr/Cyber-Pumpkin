@@ -1,5 +1,12 @@
-# Linux Platform Shell
+# Cyber-Pumpkin Linux
 
-Target: native GTK4 application with standard Linux drag/drop, MIME, desktop portal, HiDPI, accessibility, and Secret Service integration.
+Native GTK4/libadwaita frontend backed directly by the shared Rust SDK.
 
-The shell consumes the same shared core model as macOS and the CLI.
+The Local + SFTP release-candidate shell includes dual panes, Pumpkin Patch, Quick Connect, transfer queue/progress/cancel, conflict decisions, Activity/history, sync, Inspector permissions/metadata, Remote Edit, preferences, durable local recovery, and pending-remote recovery reporting.
+
+Build and verify from the repository root:
+
+```sh
+./scripts/build-native.sh
+./scripts/verify-release.sh
+```

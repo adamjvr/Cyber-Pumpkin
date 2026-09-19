@@ -5,8 +5,17 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(target_os = "linux")]
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+#[cfg(not(target_os = "macos"))]
+use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+
+#[cfg(target_os = "macos")]
+use security_framework::passwords::{
+    delete_generic_password, get_generic_password, set_generic_password,
+};
 
 #[cfg(target_os = "macos")]
 const SERVICE: &str = "Cyber-Pumpkin";
@@ -92,12 +101,19 @@ impl PlatformSecretStore {
     /// Returns whether the native helper executable can be launched.
     #[must_use]
     pub fn is_available() -> bool {
-        helper_command()
-            .arg("--help")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
+        #[cfg(target_os = "macos")]
+        {
+            true
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            helper_command()
+                .arg("--help")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+        }
     }
 }
 
@@ -118,11 +134,6 @@ impl SecretStore for PlatformSecretStore {
 #[cfg(target_os = "linux")]
 fn helper_command() -> Command {
     Command::new("secret-tool")
-}
-
-#[cfg(target_os = "macos")]
-fn helper_command() -> Command {
-    Command::new("security")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -195,54 +206,31 @@ fn platform_delete(key: &str) -> Result<(), SecretError> {
 }
 
 #[cfg(target_os = "macos")]
+const MACOS_KEYCHAIN_ITEM_NOT_FOUND: i32 = -25_300;
+
+#[cfg(target_os = "macos")]
 fn platform_set(key: &str, secret: &str) -> Result<(), SecretError> {
-    let output = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-U",
-            "-a",
-            key,
-            "-s",
-            SERVICE,
-            "-w",
-            secret,
-        ])
-        .output()
-        .map_err(|error| SecretError::Unavailable(error.to_string()))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(SecretError::Command(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ))
-    }
+    set_generic_password(SERVICE, key, secret.as_bytes())
+        .map_err(|error| SecretError::Command(error.to_string()))
 }
 
 #[cfg(target_os = "macos")]
 fn platform_get(key: &str) -> Result<Option<String>, SecretError> {
-    let output = Command::new("security")
-        .args(["find-generic-password", "-a", key, "-s", SERVICE, "-w"])
-        .output()
-        .map_err(|error| SecretError::Unavailable(error.to_string()))?;
-    if !output.status.success() {
-        return Ok(None);
+    match get_generic_password(SERVICE, key) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| SecretError::InvalidUtf8),
+        Err(error) if error.code() == MACOS_KEYCHAIN_ITEM_NOT_FOUND => Ok(None),
+        Err(error) => Err(SecretError::Command(error.to_string())),
     }
-    let value = String::from_utf8(output.stdout).map_err(|_| SecretError::InvalidUtf8)?;
-    Ok(Some(value.trim_end_matches(&['\r', '\n'][..]).to_owned()))
 }
 
 #[cfg(target_os = "macos")]
 fn platform_delete(key: &str) -> Result<(), SecretError> {
-    let output = Command::new("security")
-        .args(["delete-generic-password", "-a", key, "-s", SERVICE])
-        .output()
-        .map_err(|error| SecretError::Unavailable(error.to_string()))?;
-    if output.status.success() || output.status.code() == Some(44) {
-        Ok(())
-    } else {
-        Err(SecretError::Command(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ))
+    match delete_generic_password(SERVICE, key) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == MACOS_KEYCHAIN_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(SecretError::Command(error.to_string())),
     }
 }
 

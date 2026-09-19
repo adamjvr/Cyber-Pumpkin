@@ -19,6 +19,8 @@ cyber-pumpkin-reliability = { path = "../../sdk/reliability/cyber-pumpkin-reliab
 cyber-pumpkin-transfer = { path = "../../sdk/transfer/cyber-pumpkin-transfer" }
 cyber-pumpkin-transfer-runtime = { path = "../../sdk/transfer/cyber-pumpkin-transfer-runtime" }
 cyber-pumpkin-remote-edit = { path = "../../sdk/remote-edit/cyber-pumpkin-remote-edit" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [lints]
 workspace = true

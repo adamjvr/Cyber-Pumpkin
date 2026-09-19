@@ -205,23 +205,62 @@ fn request_copy(source: &PaneHandle, destination: &PaneHandle, bar: &CopyBar) {
     };
 
     let destination_connection = destination.connection();
-    let destination_exists = match destination_connection.connect_backend() {
-        Ok(backend) => match backend.stat(&destination_path) {
-            Ok(_) => true,
-            Err(error) if error.kind() == ErrorKind::NotFound => false,
-            Err(error) => {
-                bar.status
-                    .set_text(&format!("Destination preflight failed: {error}"));
-                return;
-            }
-        },
-        Err(error) => {
-            bar.status
-                .set_text(&format!("Destination connection failed: {error}"));
-            return;
-        }
-    };
+    let worker_path = destination_path.clone();
+    let (sender, receiver) = mpsc::channel::<Result<bool, String>>();
+    bar.root.set_visible(true);
+    bar.status
+        .set_text(&format!("Checking destination for {}…", entry.name));
 
+    let _preflight = std::thread::spawn(move || {
+        let result = match destination_connection.connect_backend_typed() {
+            Ok(backend) => match backend.stat(&worker_path) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(format!("Destination preflight failed: {error}")),
+            },
+            Err(error) => Err(format!("Destination connection failed: {error}")),
+        };
+        let _sent = sender.send(result);
+    });
+
+    let source = source.clone();
+    let destination = destination.clone();
+    let bar = bar.clone();
+    glib::timeout_add_local(Duration::from_millis(25), move || {
+        match receiver.try_recv() {
+            Ok(Ok(destination_exists)) => {
+                finish_copy_preflight(
+                    &source,
+                    &destination,
+                    entry.clone(),
+                    destination_path.clone(),
+                    destination_exists,
+                    &bar,
+                );
+                ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                bar.status.set_text(&error);
+                ControlFlow::Break
+            }
+            Err(TryRecvError::Empty) => ControlFlow::Continue,
+            Err(TryRecvError::Disconnected) => {
+                bar.status
+                    .set_text("Destination preflight worker disconnected.");
+                ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn finish_copy_preflight(
+    source: &PaneHandle,
+    destination: &PaneHandle,
+    entry: FileEntry,
+    destination_path: BackendPath,
+    destination_exists: bool,
+    bar: &CopyBar,
+) {
     if !destination_exists {
         enqueue_copy(
             source,
@@ -613,14 +652,27 @@ fn execute_copy_with_retry(
                     delay,
                     reason: error.to_string(),
                 });
-                std::thread::sleep(delay);
-                if cancellation.is_cancelled() {
+                if !wait_for_retry(delay, cancellation) {
                     return Ok(CopyRuntimeOutcome::Cancelled(TreeTransferReport::default()));
                 }
                 attempt = attempt.saturating_add(1);
             }
         }
     }
+}
+
+fn wait_for_retry(delay: Duration, cancellation: &CancellationToken) -> bool {
+    let quantum = Duration::from_millis(50);
+    let mut remaining = delay;
+    while !remaining.is_zero() {
+        if cancellation.is_cancelled() {
+            return false;
+        }
+        let slice = remaining.min(quantum);
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+    }
+    !cancellation.is_cancelled()
 }
 
 fn execute_copy_attempt(

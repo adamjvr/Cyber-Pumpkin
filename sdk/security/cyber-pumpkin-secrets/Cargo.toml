@@ -7,5 +7,8 @@ rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
+
 [lints]
 workspace = true

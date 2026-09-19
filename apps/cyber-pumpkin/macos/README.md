@@ -1,22 +1,14 @@
 # Cyber-Pumpkin macOS
 
-Native AppKit frontend.
+Native AppKit frontend backed by the shared Rust `cpk` companion.
 
-Major GUI Pass 1 uses `cpk` as a temporary process boundary for local filesystem
-enumeration, so filesystem behavior remains in the shared Rust backend instead
-of being reimplemented in Swift. The AppKit side owns presentation only.
+The Local + SFTP release-candidate shell includes dual panes, Local/SFTP browsing, Pumpkin Patch saved connections, recursive file operations, safe conflict-aware tree copy including SFTP→SFTP, shared preferences, Inspector basics, native menus, and keyboard commands.
 
-Build from the repository root on macOS:
+Build from the repository root:
 
 ```sh
 ./scripts/build-native.sh
+./scripts/verify-release.sh
 ```
 
-Run:
-
-```sh
-./scripts/run-macos.sh
-```
-
-The exact Transmit-style menu hierarchy is intentionally provisional until the
-clean-room screenshot inventory is captured.
+The AppKit layer owns presentation. Filesystem/protocol/transfer behavior remains in Rust.

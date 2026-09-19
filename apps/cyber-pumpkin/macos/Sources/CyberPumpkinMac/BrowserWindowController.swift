@@ -673,15 +673,6 @@ final class BrowserWindowController: NSObject {
         addConnection.bezelStyle = .inline
         stack.addArrangedSubview(addConnection)
 
-        let historyTitle = NSTextField(labelWithString: "History")
-        historyTitle.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-        stack.addArrangedSubview(historyTitle)
-        let history = NSTextField(
-            wrappingLabelWithString: "Recent connections will appear here."
-        )
-        history.textColor = .secondaryLabelColor
-        stack.addArrangedSubview(history)
-
         return stack
     }
 
@@ -708,29 +699,55 @@ final class BrowserWindowController: NSObject {
         }
 
         for profile in profiles {
-            let button = SavedConnectionButton(
+            let open = SavedConnectionButton(
                 title: profile.name,
                 profile: profile,
                 target: self,
                 action: #selector(openSavedConnection(_:))
             )
-            button.bezelStyle = .inline
-            button.toolTip =
-                "\(profile.username)@\(profile.host):\(profile.port)"
-            savedConnections.addArrangedSubview(button)
+            open.bezelStyle = .inline
+            open.toolTip = "\(profile.username)@\(profile.host):\(profile.port)"
+
+            let remove = RemoveSavedConnectionButton(
+                profileID: profile.id,
+                target: self,
+                action: #selector(removeSavedConnection(_:))
+            )
+            remove.bezelStyle = .inline
+            remove.toolTip = "Remove \(profile.name) from Pumpkin Patch"
+
+            let row = NSStackView(views: [open, remove])
+            row.orientation = .horizontal
+            row.spacing = 4
+            savedConnections.addArrangedSubview(row)
+        }
+    }
+
+    @objc private func removeSavedConnection(_ sender: RemoveSavedConnectionButton) {
+        do {
+            try client.removeProfile(id: sender.profileID)
+            reloadSavedConnections()
+            status.stringValue = "Removed saved connection"
+        } catch {
+            status.stringValue =
+                "Could not remove saved connection: \(error.localizedDescription)"
         }
     }
 
     @objc private func openSavedConnection(_ sender: SavedConnectionButton) {
-        do {
-            try activePane.connectSFTP(
-                sender.profile.remote,
-                path: sender.profile.path
-            )
-            status.stringValue = "Connected \(sender.profile.name)"
-        } catch {
-            status.stringValue =
-                "Saved connection failed: \(error.localizedDescription)"
+        status.stringValue = "Connecting \(sender.profile.name)…"
+        activePane.connectSFTP(
+            sender.profile.remote,
+            path: sender.profile.path
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.status.stringValue = "Connected \(sender.profile.name)"
+            case .failure(let error):
+                self.status.stringValue =
+                    "Saved connection failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -787,10 +804,7 @@ final class BrowserWindowController: NSObject {
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
-        }
-
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         guard let portNumber = UInt16(port.stringValue),
               portNumber > 0,
               !host.stringValue.isEmpty,
@@ -799,39 +813,50 @@ final class BrowserWindowController: NSObject {
             return
         }
 
+        let hostValue = host.stringValue
+        let usernameValue = username.stringValue
+        let pathValue = path.stringValue
+        let displayValue = displayName.stringValue
+        let shouldSave = saveProfile.state == .on
         let remote = SFTPConnection(
-            host: host.stringValue,
-            username: username.stringValue,
+            host: hostValue,
+            username: usernameValue,
             port: portNumber
         )
 
-        do {
-            try activePane.connectSFTP(remote, path: path.stringValue)
-
-            if saveProfile.state == .on {
-                let name = displayName.stringValue.isEmpty
-                    ? host.stringValue
-                    : displayName.stringValue
-                let profile = CPKSavedProfile(
-                    id: profileID(
+        status.stringValue = "Connecting \(remote.displayName)…"
+        activePane.connectSFTP(remote, path: pathValue) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                if shouldSave {
+                    let name = displayValue.isEmpty ? hostValue : displayValue
+                    let profile = CPKSavedProfile(
+                        id: self.profileID(
+                            name: name,
+                            host: hostValue,
+                            username: usernameValue
+                        ),
                         name: name,
-                        host: host.stringValue,
-                        username: username.stringValue
-                    ),
-                    name: name,
-                    host: host.stringValue,
-                    username: username.stringValue,
-                    port: portNumber,
-                    path: path.stringValue
-                )
-                try client.saveProfile(profile)
-                reloadSavedConnections()
+                        host: hostValue,
+                        username: usernameValue,
+                        port: portNumber,
+                        path: pathValue
+                    )
+                    do {
+                        try self.client.saveProfile(profile)
+                        self.reloadSavedConnections()
+                    } catch {
+                        self.status.stringValue =
+                            "Connected, but save failed: \(error.localizedDescription)"
+                        return
+                    }
+                }
+                self.status.stringValue = "Connected \(remote.displayName)"
+            case .failure(let error):
+                self.status.stringValue =
+                    "SFTP connection failed: \(error.localizedDescription)"
             }
-
-            status.stringValue = "Connected \(remote.displayName)"
-        } catch {
-            status.stringValue =
-                "SFTP connection failed: \(error.localizedDescription)"
         }
     }
 
@@ -846,27 +871,30 @@ final class BrowserWindowController: NSObject {
             title: "New Folder",
             message: "Create a folder in \(activePane.currentPath)",
             initial: ""
-        ) else {
-            return
-        }
+        ), validName(name) else { return }
 
-        guard validName(name) else {
-            return
-        }
-
-        let path = URL(fileURLWithPath: activePane.currentPath)
+        let pane = activePane
+        let connection = pane.connection
+        let path = URL(fileURLWithPath: pane.currentPath)
             .appendingPathComponent(name)
             .path
+        status.stringValue = "Creating \(name)…"
 
-        do {
-            try client.createDirectory(
-                connection: activePane.connection,
-                path: path
-            )
-            activePane.reloadDirectory()
-            status.stringValue = "Created \(name)"
-        } catch {
-            status.stringValue = "Create failed: \(error.localizedDescription)"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result {
+                try self.client.createDirectory(connection: connection, path: path)
+            }
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    pane.reloadDirectory()
+                    self.status.stringValue = "Created \(name)"
+                case .failure(let error):
+                    self.status.stringValue =
+                        "Create failed: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -875,33 +903,38 @@ final class BrowserWindowController: NSObject {
             status.stringValue = "Select an item to rename."
             return
         }
-
         guard let name = prompt(
             title: "Rename",
             message: "Rename \(entry.name)",
             initial: entry.name
-        ) else {
-            return
-        }
+        ), validName(name) else { return }
 
-        guard validName(name) else {
-            return
-        }
-
-        let destination = URL(fileURLWithPath: activePane.currentPath)
+        let pane = activePane
+        let connection = pane.connection
+        let destination = URL(fileURLWithPath: pane.currentPath)
             .appendingPathComponent(name)
             .path
+        status.stringValue = "Renaming \(entry.name)…"
 
-        do {
-            try client.rename(
-                connection: activePane.connection,
-                source: entry.path,
-                destination: destination
-            )
-            activePane.reloadDirectory()
-            status.stringValue = "Renamed \(entry.name) → \(name)"
-        } catch {
-            status.stringValue = "Rename failed: \(error.localizedDescription)"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result {
+                try self.client.rename(
+                    connection: connection,
+                    source: entry.path,
+                    destination: destination
+                )
+            }
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    pane.reloadDirectory()
+                    self.status.stringValue = "Renamed \(entry.name) → \(name)"
+                case .failure(let error):
+                    self.status.stringValue =
+                        "Rename failed: \(error.localizedDescription)"
+                }
+            }
         }
     }
 
@@ -911,25 +944,41 @@ final class BrowserWindowController: NSObject {
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "Delete \(entry.name)?"
-        alert.informativeText = "Non-empty folders are not removed recursively yet."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
+        let confirm = (try? client.preferences().files.confirmDelete) ?? true
+        if confirm {
+            let alert = NSAlert()
+            alert.messageText = "Delete \(entry.name)?"
+            alert.informativeText = entry.isDirectory
+                ? "The folder and all of its contents will be removed."
+                : "The selected file will be removed."
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
 
-        do {
-            try client.remove(
-                connection: activePane.connection,
-                path: entry.path
-            )
-            activePane.reloadDirectory()
-            status.stringValue = "Deleted \(entry.name)"
-        } catch {
-            status.stringValue = "Delete failed: \(error.localizedDescription)"
+        let pane = activePane
+        let connection = pane.connection
+        status.stringValue = "Deleting \(entry.name)…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let result = Result {
+                try self.client.remove(
+                    connection: connection,
+                    path: entry.path,
+                    recursive: entry.isDirectory
+                )
+            }
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    pane.reloadDirectory()
+                    self.status.stringValue = "Deleted \(entry.name)"
+                    self.activity.stringValue = "Completed • Delete \(entry.name)"
+                case .failure(let error):
+                    self.status.stringValue = "Delete failed: \(error.localizedDescription)"
+                    self.activity.stringValue = "Failed • Delete \(entry.name)"
+                }
+            }
         }
     }
 
@@ -977,28 +1026,173 @@ final class BrowserWindowController: NSObject {
         let destinationPath = URL(fileURLWithPath: destination.currentPath)
             .appendingPathComponent(entry.name)
             .path
-        status.stringValue = "Copying \(entry.name)…"
+        let sourceConnection = source.connection
+        let destinationConnection = destination.connection
+        status.stringValue = "Checking destination for \(entry.name)…"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else {
-                return
+            guard let self else { return }
+            let result = Result {
+                let exists = try self.client.destinationExists(
+                    sourceConnection: sourceConnection,
+                    source: entry.path,
+                    destinationConnection: destinationConnection,
+                    destination: destinationPath
+                )
+                let preferences = try? self.client.preferences()
+                return (exists, preferences)
             }
 
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let (exists, preferences)):
+                    self.resolveCopyPreflight(
+                        source: source,
+                        destination: destination,
+                        entry: entry,
+                        destinationPath: destinationPath,
+                        destinationExists: exists,
+                        preferences: preferences
+                    )
+                case .failure(let error):
+                    self.status.stringValue =
+                        "Destination preflight failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func resolveCopyPreflight(
+        source: PaneViewController,
+        destination: PaneViewController,
+        entry: CPKEntry,
+        destinationPath: String,
+        destinationExists: Bool,
+        preferences: CPKPreferences?
+    ) {
+        guard destinationExists else {
+            performCopy(
+                source: source,
+                destination: destination,
+                entry: entry,
+                destinationPath: destinationPath,
+                policy: .fail
+            )
+            return
+        }
+
+        let action = preferredExistingAction(
+            source: source,
+            destination: destination,
+            entry: entry,
+            preferences: preferences
+        )
+        switch action {
+        case "Replace":
+            performCopy(
+                source: source,
+                destination: destination,
+                entry: entry,
+                destinationPath: destinationPath,
+                policy: .replace
+            )
+        case "Skip":
+            status.stringValue = "Skipped existing \(entry.name)"
+            activity.stringValue = "Completed • Skipped \(entry.name)"
+        default:
+            guard let policy = askConflictPolicy(name: entry.name) else {
+                status.stringValue = "Copy cancelled before execution."
+                return
+            }
+            performCopy(
+                source: source,
+                destination: destination,
+                entry: entry,
+                destinationPath: destinationPath,
+                policy: policy
+            )
+        }
+    }
+
+    private func preferredExistingAction(
+        source: PaneViewController,
+        destination: PaneViewController,
+        entry: CPKEntry,
+        preferences: CPKPreferences?
+    ) -> String {
+        guard let preferences else { return "Ask" }
+        let sourceLocal = source.connection.isLocal
+        let destinationLocal = destination.connection.isLocal
+        if sourceLocal == destinationLocal {
+            return "Ask"
+        }
+        if !sourceLocal && destinationLocal {
+            return entry.isDirectory
+                ? preferences.transfers.downloadingFolders
+                : preferences.transfers.downloadingFiles
+        }
+        return entry.isDirectory
+            ? preferences.transfers.uploadingFolders
+            : preferences.transfers.uploadingFiles
+    }
+
+    private func askConflictPolicy(name: String) -> CPKCopyConflictPolicy? {
+        let alert = NSAlert()
+        alert.messageText = "Destination Already Exists"
+        alert.informativeText = "The destination already contains \(name)."
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Skip")
+        alert.addButton(withTitle: "Keep Both")
+        alert.addButton(withTitle: "Cancel")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return .replace
+        case .alertSecondButtonReturn:
+            return .skip
+        case .alertThirdButtonReturn:
+            return .keepBoth
+        default:
+            return nil
+        }
+    }
+
+    private func performCopy(
+        source: PaneViewController,
+        destination: PaneViewController,
+        entry: CPKEntry,
+        destinationPath: String,
+        policy: CPKCopyConflictPolicy
+    ) {
+        status.stringValue = "Copying \(entry.name)…"
+        let sourceConnection = source.connection
+        let destinationConnection = destination.connection
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
             let result = Result {
                 try self.client.copyTree(
-                    sourceConnection: source.connection,
+                    sourceConnection: sourceConnection,
                     source: entry.path,
-                    destinationConnection: destination.connection,
-                    destination: destinationPath
+                    destinationConnection: destinationConnection,
+                    destination: destinationPath,
+                    conflictPolicy: policy
                 )
             }
 
             DispatchQueue.main.async {
                 switch result {
-                case .success:
+                case .success(.completed(let actualDestination)):
                     self.status.stringValue = "Copied \(entry.name)"
-                    self.activity.stringValue = "Completed • Copy \(entry.name)"
+                    self.activity.stringValue =
+                        "Completed • Copy \(entry.name) → \(actualDestination)"
                     destination.reloadDirectory()
+                case .success(.skipped):
+                    self.status.stringValue = "Skipped existing \(entry.name)"
+                    self.activity.stringValue = "Completed • Skipped \(entry.name)"
+                case .success(.cancelled):
+                    self.status.stringValue = "Cancelled copy of \(entry.name)"
+                    self.activity.stringValue = "Cancelled • Copy \(entry.name)"
                 case .failure(let error):
                     self.status.stringValue =
                         "Copy failed: \(error.localizedDescription)"
@@ -1095,7 +1289,7 @@ final class BrowserWindowController: NSObject {
     }
 
     @objc private func showPreferences() {
-        let controller = PreferencesWindowController()
+        let controller = PreferencesWindowController(client: client)
         preferencesController = controller
         controller.show()
     }
@@ -1117,6 +1311,23 @@ final class SavedConnectionButton: NSButton {
         self.profile = profile
         super.init(frame: .zero)
         self.title = title
+        self.target = target
+        self.action = action
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+}
+
+final class RemoveSavedConnectionButton: NSButton {
+    let profileID: String
+
+    init(profileID: String, target: AnyObject?, action: Selector?) {
+        self.profileID = profileID
+        super.init(frame: .zero)
+        title = "−"
         self.target = target
         self.action = action
     }

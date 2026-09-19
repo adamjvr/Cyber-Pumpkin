@@ -6,9 +6,12 @@ use cyber_pumpkin_application::{
 use cyber_pumpkin_secrets::{PlatformSecretStore, SecretStore};
 use cyber_pumpkin_sftp::{HostKeyStatus, SftpConfig, probe_host_key};
 use gtk::Orientation;
+use gtk::glib::{self, ControlFlow};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub(crate) struct PumpkinPatchPanel {
@@ -42,27 +45,10 @@ impl PumpkinPatchPanel {
         list.set_vexpand(true);
         root.append(&list);
 
-        root.append(&section_row(
-            "Shared Connections",
-            "Shared connection discovery is not configured yet",
-        ));
-        root.append(&section_row(
-            "History",
-            "Connection history will move into the shared session engine",
-        ));
-
         let controls = gtk::Box::new(Orientation::Horizontal, 4);
         let add = gtk::Button::from_icon_name("list-add-symbolic");
         add.set_tooltip_text(Some("Quick Connect / Add to Pumpkin Patch"));
-        let group = gtk::Button::from_icon_name("folder-new-symbolic");
-        group.set_tooltip_text(Some("New connection group"));
-        group.set_sensitive(false);
-        let edit = gtk::Button::from_icon_name("edit-symbolic");
-        edit.set_tooltip_text(Some("Edit selected connection"));
-        edit.set_sensitive(false);
         controls.append(&add);
-        controls.append(&group);
-        controls.append(&edit);
         root.append(&controls);
 
         let panel = Rc::new(Self {
@@ -127,9 +113,10 @@ impl PumpkinPatchPanel {
         let row = gtk::ListBoxRow::new();
         row.set_selectable(false);
 
-        let button = gtk::Button::new();
-        button.add_css_class("flat");
-        button.set_halign(gtk::Align::Fill);
+        let open = gtk::Button::new();
+        open.add_css_class("flat");
+        open.set_hexpand(true);
+        open.set_halign(gtk::Align::Fill);
 
         let content = gtk::Box::new(Orientation::Horizontal, 10);
         content.set_margin_top(7);
@@ -149,26 +136,41 @@ impl PumpkinPatchPanel {
         )));
         address.set_xalign(1.0);
         address.add_css_class("dim-label");
-
         content.append(&icon);
         content.append(&name);
         content.append(&address);
-        button.set_child(Some(&content));
-        row.set_child(Some(&button));
+        open.set_child(Some(&content));
+
+        let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove.add_css_class("flat");
+        remove.set_tooltip_text(Some("Remove from Pumpkin Patch"));
+
+        let actions = gtk::Box::new(Orientation::Horizontal, 4);
+        actions.append(&open);
+        actions.append(&remove);
+        row.set_child(Some(&actions));
 
         let pane = self.pane.clone();
         let on_browser = Rc::clone(&self.on_browser);
-        button.connect_clicked(move |_| match auth_from_profile(&profile) {
+        let open_profile = profile.clone();
+        open.connect_clicked(move |_| match auth_from_profile(&open_profile) {
             Ok(auth) => connect_with_trust(
                 &pane,
-                &profile.host,
-                &profile.username,
-                profile.port,
-                &profile.initial_path,
+                &open_profile.host,
+                &open_profile.username,
+                open_profile.port,
+                &open_profile.initial_path,
                 auth,
                 Rc::clone(&on_browser),
             ),
             Err(error) => show_error("Pumpkin Patch authentication failed", &error),
+        });
+
+        let list = self.list.clone();
+        let row_for_remove = row.clone();
+        remove.connect_clicked(move |_| match remove_profile(&profile) {
+            Ok(()) => list.remove(&row_for_remove),
+            Err(error) => show_error("Could not remove Pumpkin Patch connection", &error),
         });
 
         row
@@ -393,59 +395,85 @@ fn connect_with_trust(
             return;
         }
     };
-    let probe = match probe_host_key(&config) {
-        Ok(probe) => probe,
-        Err(error) => {
-            show_error("SSH host-key probe failed", &error.to_string());
-            return;
-        }
-    };
 
-    match probe.status() {
-        HostKeyStatus::Match => {
-            connect_now(pane, host, username, port, path, auth, None, &on_success);
-        }
-        HostKeyStatus::Mismatch => show_error(
-            "SSH host key changed",
-            &format!(
-                "The server key does not match OpenSSH known_hosts.\n\nPresented SHA-256 fingerprint:\n{}",
-                probe.fingerprint()
-            ),
-        ),
-        HostKeyStatus::Failure => show_error(
-            "SSH host verification failed",
-            &format!("Fingerprint: {}", probe.fingerprint()),
-        ),
-        HostKeyStatus::Unknown => {
-            let fingerprint = probe.fingerprint().to_owned();
-            let trusted = TrustedHosts::load_default()
-                .ok()
-                .and_then(|hosts| hosts.fingerprint(host, port).map(str::to_owned));
-            if trusted.as_deref() == Some(fingerprint.as_str()) {
-                connect_now(
-                    pane,
-                    host,
-                    username,
-                    port,
-                    path,
-                    auth,
-                    Some(fingerprint),
-                    &on_success,
-                );
-                return;
+    let (sender, receiver) = mpsc::channel();
+    let _probe = std::thread::spawn(move || {
+        let result = probe_host_key(&config).map_err(|error| error.to_string());
+        let _sent = sender.send(result);
+    });
+
+    let pane = pane.clone();
+    let host = host.to_owned();
+    let username = username.to_owned();
+    let path = path.to_owned();
+    glib::timeout_add_local(Duration::from_millis(25), move || {
+        match receiver.try_recv() {
+            Ok(Ok(probe)) => {
+                match probe.status() {
+                    HostKeyStatus::Match => connect_now(
+                        &pane,
+                        &host,
+                        &username,
+                        port,
+                        &path,
+                        auth.clone(),
+                        None,
+                        Rc::clone(&on_success),
+                    ),
+                    HostKeyStatus::Mismatch => show_error(
+                        "SSH host key changed",
+                        &format!(
+                            "The server key does not match OpenSSH known_hosts.\n\nPresented SHA-256 fingerprint:\n{}",
+                            probe.fingerprint()
+                        ),
+                    ),
+                    HostKeyStatus::Failure => show_error(
+                        "SSH host verification failed",
+                        &format!("Fingerprint: {}", probe.fingerprint()),
+                    ),
+                    HostKeyStatus::Unknown => {
+                        let fingerprint = probe.fingerprint().to_owned();
+                        let trusted = TrustedHosts::load_default()
+                            .ok()
+                            .and_then(|hosts| hosts.fingerprint(&host, port).map(str::to_owned));
+                        if trusted.as_deref() == Some(fingerprint.as_str()) {
+                            connect_now(
+                                &pane,
+                                &host,
+                                &username,
+                                port,
+                                &path,
+                                auth.clone(),
+                                Some(fingerprint),
+                                Rc::clone(&on_success),
+                            );
+                        } else {
+                            show_unknown_host_dialog(
+                                &pane,
+                                &host,
+                                &username,
+                                port,
+                                &path,
+                                auth.clone(),
+                                fingerprint,
+                                Rc::clone(&on_success),
+                            );
+                        }
+                    }
+                }
+                ControlFlow::Break
             }
-            show_unknown_host_dialog(
-                pane,
-                host,
-                username,
-                port,
-                path,
-                auth,
-                fingerprint,
-                on_success,
-            );
+            Ok(Err(error)) => {
+                show_error("SSH host-key probe failed", &error);
+                ControlFlow::Break
+            }
+            Err(TryRecvError::Empty) => ControlFlow::Continue,
+            Err(TryRecvError::Disconnected) => {
+                show_error("SSH host-key probe failed", "Host-key worker disconnected.");
+                ControlFlow::Break
+            }
         }
-    }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -505,7 +533,7 @@ fn show_unknown_host_dialog(
                 &path,
                 auth.clone(),
                 Some(fingerprint.clone()),
-                &on_success,
+                Rc::clone(&on_success),
             );
         }
         dialog.close();
@@ -522,12 +550,38 @@ fn connect_now(
     path: &str,
     auth: PaneSftpAuth,
     trusted_fingerprint: Option<String>,
-    on_success: &Rc<dyn Fn()>,
+    on_success: Rc<dyn Fn()>,
 ) {
-    match pane.connect_sftp_with_auth(host, username, port, path, auth, trusted_fingerprint) {
-        Ok(()) => on_success(),
-        Err(error) => show_error("SFTP connection failed", &error),
+    pane.connect_sftp_with_auth_async(
+        host,
+        username,
+        port,
+        path,
+        auth,
+        trusted_fingerprint,
+        Rc::new(move |result| match result {
+            Ok(()) => on_success(),
+            Err(error) => show_error("SFTP connection failed", &error),
+        }),
+    );
+}
+
+fn remove_profile(profile: &SavedConnection) -> Result<(), String> {
+    let mut profiles = ConnectionProfiles::load_default().map_err(|error| error.to_string())?;
+    if !profiles.remove(&profile.id) {
+        return Err("saved connection no longer exists".to_owned());
     }
+    profiles.save_default().map_err(|error| error.to_string())?;
+
+    if let Some(secret_key) = profile.secret_key.as_deref() {
+        let mut store = PlatformSecretStore;
+        if let Err(error) = store.delete(secret_key) {
+            return Err(format!(
+                "connection removed, but credential cleanup failed: {error}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -601,23 +655,6 @@ fn page_title(text: &str) -> gtk::Label {
     label.set_xalign(0.0);
     label.add_css_class("title-2");
     label
-}
-
-fn section_row(title: &str, detail: &str) -> gtk::Box {
-    let row = gtk::Box::new(Orientation::Horizontal, 10);
-    row.set_margin_top(5);
-    row.set_margin_bottom(5);
-    let icon = gtk::Image::from_icon_name("folder-remote-symbolic");
-    let label = gtk::Label::new(Some(title));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.add_css_class("heading");
-    let detail = gtk::Label::new(Some(detail));
-    detail.add_css_class("dim-label");
-    row.append(&icon);
-    row.append(&label);
-    row.append(&detail);
-    row
 }
 
 fn message_row(text: &str) -> gtk::ListBoxRow {

@@ -1,9 +1,10 @@
 //! Cyber-Pumpkin command-line companion.
 
 use cyber_pumpkin_application::{
-    ConnectionProfiles, SavedConnection, application_support_directory,
+    AppPreferences, ConnectionProfiles, DoubleClickAction, ExistingItemAction, SavedConnection,
+    application_support_directory,
 };
-use cyber_pumpkin_backend::Backend;
+use cyber_pumpkin_backend::{Backend, ErrorKind};
 use cyber_pumpkin_core::{BackendId, BackendPath, FileEntry};
 use cyber_pumpkin_file_ops::remove_tree;
 use cyber_pumpkin_history::HistoryLog;
@@ -19,10 +20,13 @@ use cyber_pumpkin_transfer::{
 };
 use cyber_pumpkin_transfer_runtime::{
     CopyConflictPolicy, CopyRequest, CopyRuntimeOutcome, execute_copy as execute_runtime_copy,
+    execute_copy_with_recovery,
 };
+use serde::Deserialize;
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::time::Duration;
 
 const USAGE: &str = r"Cyber-Pumpkin cpk
 
@@ -49,6 +53,10 @@ USAGE:
   cpk profile-list
   cpk profile-add <id> <name> <host> <username> <port> <remote-path>
   cpk profile-rm <id>
+  cpk preferences-show
+  cpk preferences-set <key> <value>
+  cpk transfer-tree-preflight <request-json>
+  cpk transfer-tree-request <request-json>
   cpk sftp-ls <host> <username> <remote-path> [port]
   cpk sftp-put <local-source> <host> <username> <remote-destination> [port]
   cpk sftp-get <host> <username> <remote-source> <local-destination> [port]
@@ -57,6 +65,7 @@ USAGE:
   cpk sftp-mkdir <host> <username> <remote-path> [port]
   cpk sftp-rename <host> <username> <remote-source> <remote-destination> [port]
   cpk sftp-rm <host> <username> <remote-path> [port]
+  cpk sftp-rm-tree <host> <username> <remote-path> [port]
 
 SFTP authentication uses the SSH agent. Host keys must already match
 ~/.ssh/known_hosts. Passwords are intentionally not accepted as CLI arguments.";
@@ -75,7 +84,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     match command.as_deref() {
         Some("about") => {
             ensure_finished(&mut args)?;
-            println!("Cyber-Pumpkin cpk 0.1.0 — Phase 1 Local + SFTP vertical slice");
+            println!(
+                "Cyber-Pumpkin cpk {} — Local + SFTP release candidate",
+                env!("CARGO_PKG_VERSION")
+            );
         }
         Some("local-ls") => local_ls_command(&mut args)?,
         Some("local-stat") => local_stat_command(&mut args)?,
@@ -98,6 +110,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("profile-list") => profile_list_command(&mut args)?,
         Some("profile-add") => profile_add_command(&mut args)?,
         Some("profile-rm") => profile_remove_command(&mut args)?,
+        Some("preferences-show") => preferences_show_command(&mut args)?,
+        Some("preferences-set") => preferences_set_command(&mut args)?,
+        Some("transfer-tree-preflight") => transfer_tree_preflight_command(&mut args)?,
+        Some("transfer-tree-request") => transfer_tree_request_command(&mut args)?,
         Some("sftp-ls") => sftp_list_command(&mut args)?,
         Some("sftp-put") => sftp_put_command(&mut args)?,
         Some("sftp-get") => sftp_get_command(&mut args)?,
@@ -106,6 +122,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("sftp-mkdir") => sftp_mkdir_command(&mut args)?,
         Some("sftp-rename") => sftp_rename_command(&mut args)?,
         Some("sftp-rm") => sftp_remove_command(&mut args)?,
+        Some("sftp-rm-tree") => sftp_remove_tree_command(&mut args)?,
         Some("help" | "--help" | "-h") | None => println!("{USAGE}"),
         Some(other) => {
             return Err(io::Error::new(
@@ -644,6 +661,284 @@ fn sftp_remove_command(args: &mut impl Iterator<Item = String>) -> Result<(), Bo
     sftp_remove(&host, &username, &path, port)
 }
 
+fn sftp_remove_tree_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let host = next_arg(args, "host")?;
+    let username = next_arg(args, "username")?;
+    let path = next_arg(args, "remote-path")?;
+    let port = optional_port(args.next())?;
+    ensure_finished(args)?;
+    let backend = remote_backend(&host, &username, port)?;
+    let path = BackendPath::new(path)?;
+    let report = remove_tree(&backend, &path)?;
+    println!(
+        "removed files={} directories={} entries={}",
+        report.files_removed,
+        report.directories_removed,
+        report.entries_removed(),
+    );
+    Ok(())
+}
+
+fn preferences_show_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    ensure_finished(args)?;
+    println!(
+        "{}",
+        serde_json::to_string(&AppPreferences::load_default()?)?
+    );
+    Ok(())
+}
+
+fn preferences_set_command(args: &mut impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let key = next_arg(args, "key")?;
+    let value = next_arg(args, "value")?;
+    ensure_finished(args)?;
+    let mut preferences = AppPreferences::load_default()?;
+
+    match key.as_str() {
+        "files.confirm-delete" => preferences.files.confirm_delete = parse_bool(&value)?,
+        "files.double-click-action" => {
+            preferences.files.double_click_action = parse_double_click_action(&value)?;
+        }
+        "transfers.downloading-files" => {
+            preferences.transfers.downloading_files = parse_existing_item_action(&value)?;
+        }
+        "transfers.downloading-folders" => {
+            preferences.transfers.downloading_folders = parse_existing_item_action(&value)?;
+        }
+        "transfers.uploading-files" => {
+            preferences.transfers.uploading_files = parse_existing_item_action(&value)?;
+        }
+        "transfers.uploading-folders" => {
+            preferences.transfers.uploading_folders = parse_existing_item_action(&value)?;
+        }
+        "transfers.simultaneous-transfers" => {
+            let count = value.parse::<u8>()?;
+            if !(1..=20).contains(&count) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "simultaneous transfers must be in 1..=20",
+                )
+                .into());
+            }
+            preferences.transfers.simultaneous_transfers = count;
+        }
+        "transfers.keep-activity" => preferences.transfers.keep_activity = parse_bool(&value)?,
+        "advanced.keep-connections-alive" => {
+            preferences.advanced.keep_connections_alive = parse_bool(&value)?;
+        }
+        "advanced.verbose-logging" => {
+            preferences.advanced.verbose_logging = parse_bool(&value)?;
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown preference key: {other}"),
+            )
+            .into());
+        }
+    }
+
+    preferences.save_default()?;
+    println!("saved {key}");
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferEndpointRequest {
+    kind: String,
+    path: String,
+    host: Option<String>,
+    username: Option<String>,
+    port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferTreeRequest {
+    operation_id: u64,
+    source: TransferEndpointRequest,
+    destination: TransferEndpointRequest,
+    conflict_policy: String,
+}
+
+fn transfer_tree_preflight_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let request_path = next_arg(args, "request-json")?;
+    ensure_finished(args)?;
+    let request = read_transfer_tree_request(&request_path)?;
+    let (backend, endpoint) =
+        build_transfer_endpoint(&request.destination, "preflight-destination")?;
+    let exists = match backend.stat(&endpoint.path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    println!("{}", serde_json::json!({ "exists": exists }));
+    Ok(())
+}
+
+fn transfer_tree_request_command(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let request_path = next_arg(args, "request-json")?;
+    ensure_finished(args)?;
+    let request = read_transfer_tree_request(&request_path)?;
+    let (source_backend, source_endpoint) =
+        build_transfer_endpoint(&request.source, "tree-source")?;
+    let (destination_backend, destination_endpoint) =
+        build_transfer_endpoint(&request.destination, "tree-destination")?;
+    let policy = parse_runtime_conflict_policy(&request.conflict_policy)?;
+    let transfer_id = TransferId::new(request.operation_id)?;
+    let runtime_request = CopyRequest {
+        id: transfer_id,
+        source: source_endpoint,
+        destination: destination_endpoint,
+        conflict_policy: policy,
+    };
+    let family = if request.destination.kind == "local" {
+        "local"
+    } else {
+        "remote"
+    };
+    let journal_path = application_support_directory()
+        .join("recovery")
+        .join(family)
+        .join(format!("cpk-tree-{}.json", request.operation_id));
+
+    match execute_copy_with_recovery(
+        &runtime_request,
+        source_backend.as_ref(),
+        destination_backend.as_ref(),
+        &CancellationToken::new(),
+        Some(&journal_path),
+        |_| {},
+    )? {
+        CopyRuntimeOutcome::Completed(report) => println!(
+            "{}",
+            serde_json::json!({
+                "state": "completed",
+                "destination": report.destination.as_str(),
+                "files": report.transfer.files_copied(),
+                "directories": report.transfer.directories_created(),
+                "bytes": report.transfer.bytes_copied(),
+                "replaced": report.replaced_existing,
+            })
+        ),
+        CopyRuntimeOutcome::Skipped { destination } => println!(
+            "{}",
+            serde_json::json!({
+                "state": "skipped",
+                "destination": destination.as_str(),
+            })
+        ),
+        CopyRuntimeOutcome::Cancelled(report) => println!(
+            "{}",
+            serde_json::json!({
+                "state": "cancelled",
+                "files": report.files_copied(),
+                "directories": report.directories_created(),
+                "bytes": report.bytes_copied(),
+            })
+        ),
+    }
+    Ok(())
+}
+
+fn read_transfer_tree_request(path: &str) -> Result<TransferTreeRequest, Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn build_transfer_endpoint(
+    request: &TransferEndpointRequest,
+    backend_id: &str,
+) -> Result<(Box<dyn Backend>, Endpoint), Box<dyn Error>> {
+    let id = BackendId::new(backend_id)?;
+    let backend: Box<dyn Backend> = match request.kind.as_str() {
+        "local" => Box::new(LocalBackend::new(id.clone())),
+        "sftp" => {
+            let host = request.host.as_deref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "SFTP endpoint requires host")
+            })?;
+            let username = request.username.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "SFTP endpoint requires username",
+                )
+            })?;
+            let port = request.port.unwrap_or(22);
+            let mut config = SftpConfig::new(id.clone(), host, username)?.with_port(port);
+            let preferences = AppPreferences::load_default().unwrap_or_default();
+            config = if preferences.advanced.keep_connections_alive {
+                config.with_keepalive_interval(Some(Duration::from_secs(60)))
+            } else {
+                config.with_keepalive_interval(None)
+            };
+            Box::new(SftpBackend::connect(&config, &SftpAuth::Agent)?)
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported endpoint kind: {other}"),
+            )
+            .into());
+        }
+    };
+    let endpoint = Endpoint {
+        backend: id,
+        path: BackendPath::new(request.path.clone())?,
+    };
+    Ok((backend, endpoint))
+}
+
+fn parse_runtime_conflict_policy(value: &str) -> Result<CopyConflictPolicy, io::Error> {
+    match value {
+        "fail" => Ok(CopyConflictPolicy::Fail),
+        "replace" => Ok(CopyConflictPolicy::Replace),
+        "skip" => Ok(CopyConflictPolicy::Skip),
+        "keep-both" => Ok(CopyConflictPolicy::KeepBoth),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported conflict policy: {other}"),
+        )),
+    }
+}
+
+fn parse_bool(value: &str) -> Result<bool, io::Error> {
+    match value {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("expected boolean value, got {other}"),
+        )),
+    }
+}
+
+fn parse_existing_item_action(value: &str) -> Result<ExistingItemAction, io::Error> {
+    match value {
+        "ask" => Ok(ExistingItemAction::Ask),
+        "replace" => Ok(ExistingItemAction::Replace),
+        "skip" => Ok(ExistingItemAction::Skip),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("expected ask|replace|skip, got {other}"),
+        )),
+    }
+}
+
+fn parse_double_click_action(value: &str) -> Result<DoubleClickAction, io::Error> {
+    match value {
+        "open" => Ok(DoubleClickAction::Open),
+        "transfer" => Ok(DoubleClickAction::Transfer),
+        "inspect" => Ok(DoubleClickAction::Inspect),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("expected open|transfer|inspect, got {other}"),
+        )),
+    }
+}
+
 fn next_arg(
     args: &mut impl Iterator<Item = String>,
     name: &'static str,
@@ -683,7 +978,13 @@ fn local_backend() -> Result<LocalBackend, Box<dyn Error>> {
 }
 
 fn remote_backend(host: &str, username: &str, port: u16) -> Result<SftpBackend, Box<dyn Error>> {
-    let config = SftpConfig::new(BackendId::new("sftp")?, host, username)?.with_port(port);
+    let mut config = SftpConfig::new(BackendId::new("sftp")?, host, username)?.with_port(port);
+    let preferences = AppPreferences::load_default().unwrap_or_default();
+    config = if preferences.advanced.keep_connections_alive {
+        config.with_keepalive_interval(Some(Duration::from_secs(60)))
+    } else {
+        config.with_keepalive_interval(None)
+    };
     Ok(SftpBackend::connect(&config, &SftpAuth::Agent)?)
 }
 
@@ -950,4 +1251,44 @@ fn sftp_remove(host: &str, username: &str, path: &str, port: u16) -> Result<(), 
     backend.remove(&BackendPath::new(path)?)?;
     println!("removed {path}");
     Ok(())
+}
+#[cfg(test)]
+mod completion_tests {
+    use super::{
+        CopyConflictPolicy, TransferTreeRequest, parse_bool, parse_runtime_conflict_policy,
+    };
+
+    #[test]
+    fn completion_conflict_policy_accepts_keep_both() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            parse_runtime_conflict_policy("keep-both")?,
+            CopyConflictPolicy::KeepBoth
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn completion_boolean_parser_is_strict() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(parse_bool("true")?);
+        assert!(!parse_bool("false")?);
+        assert!(parse_bool("maybe").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn completion_transfer_request_deserializes() -> Result<(), Box<dyn std::error::Error>> {
+        let request: TransferTreeRequest = serde_json::from_str(
+            r#"{
+                "operation_id": 7,
+                "source": {"kind":"local","path":"/tmp/a","host":null,"username":null,"port":null},
+                "destination": {"kind":"sftp","path":"/tmp/b","host":"example.test","username":"adam","port":22},
+                "conflict_policy":"replace"
+            }"#,
+        )?;
+        assert_eq!(request.operation_id, 7);
+        assert_eq!(request.source.kind, "local");
+        assert_eq!(request.destination.kind, "sftp");
+        assert_eq!(request.conflict_policy, "replace");
+        Ok(())
+    }
 }
