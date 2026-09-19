@@ -4,7 +4,9 @@ use crate::activity;
 use crate::browser::{PaneHandle, format_size};
 use crate::connection::PaneConnection;
 use adw::prelude::*;
-use cyber_pumpkin_application::{AppPreferences, ExistingItemAction};
+use cyber_pumpkin_application::{
+    AppPreferences, ExistingItemAction, application_support_directory,
+};
 use cyber_pumpkin_backend::{BackendError, ErrorKind};
 use cyber_pumpkin_core::{BackendPath, EntryKind, FileEntry};
 use cyber_pumpkin_decisions::{
@@ -18,13 +20,14 @@ use cyber_pumpkin_transfer::{
 };
 use cyber_pumpkin_transfer_runtime::{
     CopyConflictPolicy, CopyRequest, CopyRuntimeError, CopyRuntimeOutcome, RetryPolicy,
-    execute_copy, retryable_copy_error, retryable_error_kind,
+    execute_copy_with_recovery, retryable_copy_error, retryable_error_kind,
 };
 use gtk::Orientation;
 use gtk::glib::{self, ControlFlow};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
@@ -539,6 +542,7 @@ fn start_worker(job: CopyJob, bar: &CopyBar) {
     };
     let source_connection = job.source_connection.clone();
     let destination_connection = job.destination_connection.clone();
+    let recovery_journal = copy_recovery_journal(&job);
     let (sender, receiver) = mpsc::channel();
 
     let _worker = std::thread::spawn(move || {
@@ -547,6 +551,7 @@ fn start_worker(job: CopyJob, bar: &CopyBar) {
             &source_connection,
             &destination_connection,
             &cancellation,
+            &recovery_journal,
             &sender,
         );
         let _sent = sender.send(CopyWorkerEvent::Finished(result));
@@ -555,11 +560,28 @@ fn start_worker(job: CopyJob, bar: &CopyBar) {
     watch_result(receiver, job, bar.clone());
 }
 
+fn copy_recovery_journal(job: &CopyJob) -> PathBuf {
+    let destination_family = if job.destination_connection.is_local() {
+        "local"
+    } else {
+        "remote"
+    };
+    application_support_directory()
+        .join("recovery")
+        .join(destination_family)
+        .join(format!(
+            "copy-{}-{}.json",
+            std::process::id(),
+            job.operation_id.get()
+        ))
+}
+
 fn execute_copy_with_retry(
     request: &CopyRequest,
     source_connection: &PaneConnection,
     destination_connection: &PaneConnection,
     cancellation: &CancellationToken,
+    recovery_journal: &Path,
     sender: &mpsc::Sender<CopyWorkerEvent>,
 ) -> Result<CopyRuntimeOutcome, String> {
     let policy = RetryPolicy::default();
@@ -575,6 +597,7 @@ fn execute_copy_with_retry(
             source_connection,
             destination_connection,
             cancellation,
+            recovery_journal,
             sender,
         ) {
             Ok(outcome) => return Ok(outcome),
@@ -605,6 +628,7 @@ fn execute_copy_attempt(
     source_connection: &PaneConnection,
     destination_connection: &PaneConnection,
     cancellation: &CancellationToken,
+    recovery_journal: &Path,
     sender: &mpsc::Sender<CopyWorkerEvent>,
 ) -> Result<CopyRuntimeOutcome, CopyAttemptError> {
     let source_backend = source_connection.connect_backend_typed().map_err(|error| {
@@ -620,11 +644,12 @@ fn execute_copy_attempt(
             error,
         })?;
     let progress_sender = sender.clone();
-    execute_copy(
+    execute_copy_with_recovery(
         request,
         source_backend.as_ref(),
         destination_backend.as_ref(),
         cancellation,
+        Some(recovery_journal),
         move |progress| {
             let _sent = progress_sender.send(CopyWorkerEvent::Progress(progress));
         },

@@ -4,6 +4,7 @@ use crate::inspector::InspectorPane;
 use crate::pane_workspace::{PaneMode, PaneWorkspace};
 use crate::preferences_ui;
 use crate::remote_edit_ui;
+use crate::startup_recovery;
 use crate::sync_ui::SyncPanel;
 use crate::transfer_ui::{CopyBar, build_copy_bar};
 use adw::prelude::*;
@@ -115,6 +116,7 @@ pub(crate) fn build_ui(app: &adw::Application) {
     }
 
     let activity_list = activity::create_activity_list();
+    startup_recovery::run(&activity_list);
     remote_edit_ui::install_activity_bridge(&activity_list);
     let decision_center = Rc::new(RefCell::new(DecisionCenter::new()));
     let activity_popover = create_activity_popover(&activity_list);

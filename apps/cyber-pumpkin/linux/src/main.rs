@@ -9,6 +9,7 @@ mod preferences_ui;
 mod remote_edit_ui;
 mod server_workspace;
 mod shell;
+mod startup_recovery;
 mod sync_ui;
 mod transfer_ui;
 

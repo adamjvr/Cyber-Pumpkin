@@ -25,6 +25,7 @@ cyber-pumpkin-sync = { version = "0.1.0", path = "../../../sdk/sync/cyber-pumpki
 cyber-pumpkin-transfer = { version = "0.1.0", path = "../../../sdk/transfer/cyber-pumpkin-transfer" }
 cyber-pumpkin-transfer-runtime = { version = "0.1.0", path = "../../../sdk/transfer/cyber-pumpkin-transfer-runtime" }
 cyber-pumpkin-remote-edit = { version = "0.1.0", path = "../../../sdk/remote-edit/cyber-pumpkin-remote-edit" }
+cyber-pumpkin-recovery = { version = "0.1.0", path = "../../../sdk/reliability/cyber-pumpkin-recovery" }
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_6"] }
 
 [lints]

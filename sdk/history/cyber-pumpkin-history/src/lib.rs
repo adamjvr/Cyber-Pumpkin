@@ -24,6 +24,8 @@ pub enum HistoryKind {
     Rename,
     /// Remote-edit watcher, upload, conflict, or stop event.
     RemoteEdit,
+    /// Crash-recovery replay or pending-recovery notice.
+    Recovery,
     /// Other operation not covered by a stable category.
     Other,
 }

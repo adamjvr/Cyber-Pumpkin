@@ -6,13 +6,15 @@
 use cyber_pumpkin_backend::{Backend, BackendError, ErrorKind};
 use cyber_pumpkin_core::BackendPath;
 use cyber_pumpkin_reliability::{
-    ReliabilityError, ReliableTreeOutcome, ReliableTreeReport, execute_tree_reliable,
+    ReliabilityError, ReliableTreeOutcome, ReliableTreeReport, ReliableTreeRequest,
+    execute_tree_reliable_request,
 };
 use cyber_pumpkin_transfer::{
     CancellationToken, Endpoint, ExecutionError, RecursiveError, TransferId, TransferSpec,
     TreeTransferProgress, TreeTransferReport,
 };
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
 const MAX_RETRY_ATTEMPTS: u8 = 5;
@@ -236,6 +238,32 @@ pub fn execute_copy<F>(
 where
     F: FnMut(TreeTransferProgress),
 {
+    execute_copy_with_recovery(
+        request,
+        source,
+        destination,
+        cancellation,
+        None,
+        on_progress,
+    )
+}
+
+/// Executes one copy with an optional durable recovery journal.
+///
+/// # Errors
+///
+/// Returns [`CopyRuntimeError`] for preflight, backend, reliable-transfer, or journal failures.
+pub fn execute_copy_with_recovery<F>(
+    request: &CopyRequest,
+    source: &dyn Backend,
+    destination: &dyn Backend,
+    cancellation: &CancellationToken,
+    recovery_journal: Option<&Path>,
+    on_progress: F,
+) -> Result<CopyRuntimeOutcome, CopyRuntimeError>
+where
+    F: FnMut(TreeTransferProgress),
+{
     let exists = destination_exists(destination, &request.destination.path)?;
     if exists && request.conflict_policy == CopyConflictPolicy::Fail {
         return Err(CopyRuntimeError::DestinationExists(
@@ -263,15 +291,16 @@ where
         },
     };
 
-    let outcome = execute_tree_reliable(
-        request.id,
-        &spec,
+    let tree_request = ReliableTreeRequest {
+        id: request.id,
+        spec: &spec,
         source,
         destination,
         cancellation,
         replace_existing,
-        on_progress,
-    )?;
+        recovery_journal,
+    };
+    let outcome = execute_tree_reliable_request(&tree_request, on_progress)?;
 
     match outcome {
         ReliableTreeOutcome::Completed(ReliableTreeReport {

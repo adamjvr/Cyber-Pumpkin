@@ -6,7 +6,9 @@ use cyber_pumpkin_file_ops::remove_tree_if_present;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const MAX_DISCOVERED_JOURNALS: usize = 1024;
 
 /// Recovery state for one replacement transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -83,6 +85,22 @@ impl RecoveryJournal {
         fs::rename(temporary, path)
     }
 
+    /// Saves a non-empty journal, or removes an empty journal file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::Error`] for filesystem or serialization failures.
+    pub fn save_or_remove(&self, path: &Path) -> Result<(), io::Error> {
+        if self.entries.is_empty() {
+            return match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
+        self.save(path)
+    }
+
     /// Inserts or replaces one operation entry.
     pub fn upsert(&mut self, entry: RecoveryEntry) {
         if let Some(existing) = self
@@ -102,6 +120,48 @@ impl RecoveryJournal {
         self.entries
             .retain(|entry| entry.operation_id != operation_id);
     }
+}
+
+/// Recursively discovers regular JSON recovery journals below `root`.
+///
+/// Symlinks are not followed and discovery is bounded.
+///
+/// # Errors
+///
+/// Returns [`io::Error`] for enumeration failures or if the safety bound is exceeded.
+pub fn discover_journals(root: &Path) -> Result<Vec<PathBuf>, io::Error> {
+    let mut journals = Vec::new();
+    discover_journals_inner(root, &mut journals)?;
+    journals.sort();
+    Ok(journals)
+}
+
+fn discover_journals_inner(root: &Path, journals: &mut Vec<PathBuf>) -> Result<(), io::Error> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            discover_journals_inner(&path, journals)?;
+            continue;
+        }
+        if !file_type.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json")
+        {
+            continue;
+        }
+        journals.push(path);
+        if journals.len() > MAX_DISCOVERED_JOURNALS {
+            return Err(io::Error::other(format!(
+                "recovery journal discovery exceeded {MAX_DISCOVERED_JOURNALS} files"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Recovery action taken for one journal entry.
@@ -169,6 +229,10 @@ pub fn recover_journal(
     let mut journal = RecoveryJournal::load(path)?;
     let entries = journal.entries.clone();
     let mut report = RecoverySweepReport::default();
+    if entries.is_empty() {
+        journal.save_or_remove(path)?;
+        return Ok(report);
+    }
     for entry in entries {
         let action = recover_entry(backend, &entry)?;
         report.entries_processed = report.entries_processed.saturating_add(1);
@@ -178,7 +242,7 @@ pub fn recover_journal(
             RecoveryAction::Noop => report.noop = report.noop.saturating_add(1),
         }
         journal.remove(entry.operation_id);
-        journal.save(path)?;
+        journal.save_or_remove(path)?;
     }
     Ok(report)
 }
@@ -207,8 +271,12 @@ pub fn recover_entry(
     match entry.phase {
         RecoveryPhase::Staging => {
             if let Some(stage) = stage {
-                remove_tree_if_present(backend, &stage)?;
-                Ok(RecoveryAction::Cleaned)
+                let removed = remove_tree_if_present(backend, &stage)?.entries_removed() > 0;
+                Ok(if removed {
+                    RecoveryAction::Cleaned
+                } else {
+                    RecoveryAction::Noop
+                })
             } else {
                 Ok(RecoveryAction::Noop)
             }
@@ -298,7 +366,10 @@ fn exists(backend: &dyn Backend, path: &BackendPath) -> Result<bool, BackendErro
 
 #[cfg(test)]
 mod tests {
-    use super::{RecoveryAction, RecoveryEntry, RecoveryJournal, RecoveryPhase, recover_entry};
+    use super::{
+        RecoveryAction, RecoveryEntry, RecoveryJournal, RecoveryPhase, discover_journals,
+        recover_entry,
+    };
     use cyber_pumpkin_core::BackendId;
     use cyber_pumpkin_local::LocalBackend;
     use std::fs;
@@ -332,6 +403,44 @@ mod tests {
         journal.save(&path)?;
         assert_eq!(RecoveryJournal::load(&path)?, journal);
 
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_nested_json_journals_only() -> Result<(), Box<dyn std::error::Error>> {
+        let root = root();
+        fs::create_dir_all(root.join("nested"))?;
+        fs::write(root.join("one.json"), b"{}")?;
+        fs::write(root.join("nested/two.json"), b"{}")?;
+        fs::write(root.join("nested/ignore.txt"), b"x")?;
+        let journals = discover_journals(&root)?;
+        assert_eq!(journals.len(), 2);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn staging_recovery_keeps_committed_destination_when_stage_is_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = root();
+        fs::create_dir_all(&root)?;
+        let destination = root.join("destination.txt");
+        let vanished_stage = root.join("stage.txt");
+        fs::write(&destination, b"committed")?;
+        let backend = LocalBackend::new(BackendId::new("local")?);
+        let action = recover_entry(
+            &backend,
+            &RecoveryEntry {
+                operation_id: 12,
+                destination: destination.to_string_lossy().into_owned(),
+                stage: Some(vanished_stage.to_string_lossy().into_owned()),
+                backup: None,
+                phase: RecoveryPhase::Staging,
+            },
+        )?;
+        assert_eq!(action, RecoveryAction::Noop);
+        assert_eq!(fs::read(&destination)?, b"committed");
         fs::remove_dir_all(root)?;
         Ok(())
     }

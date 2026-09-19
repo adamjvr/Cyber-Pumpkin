@@ -135,6 +135,7 @@ dependencies = [
  "cyber-pumpkin-history",
  "cyber-pumpkin-local",
  "cyber-pumpkin-operations",
+ "cyber-pumpkin-recovery",
  "cyber-pumpkin-remote-edit",
  "cyber-pumpkin-scheduler",
  "cyber-pumpkin-secrets",

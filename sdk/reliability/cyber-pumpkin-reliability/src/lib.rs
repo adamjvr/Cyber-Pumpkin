@@ -632,15 +632,13 @@ fn finalize_stage(
     recovery_entry: &mut RecoveryEntry,
 ) -> Result<(), ReliabilityError> {
     if !destination_exists {
-        if let Some(journal_path) = recovery_journal {
-            recovery_entry.phase = RecoveryPhase::Finalized;
-            persist_recovery_entry(journal_path, recovery_entry)?;
-        }
         if let Err(error) = destination.rename(stage, final_path) {
             let _cleanup_result = remove_if_present(destination, stage);
             return Err(error.into());
         }
         if let Some(journal_path) = recovery_journal {
+            recovery_entry.phase = RecoveryPhase::Finalized;
+            persist_recovery_entry(journal_path, recovery_entry)?;
             clear_recovery_entry(journal_path, recovery_entry.operation_id)?;
         }
         return Ok(());
@@ -713,7 +711,7 @@ fn clear_recovery_entry(path: &Path, operation_id: u64) -> Result<(), Reliabilit
         RecoveryJournal::load(path).map_err(|error| journal_error(path, error.to_string()))?;
     journal.remove(operation_id);
     journal
-        .save(path)
+        .save_or_remove(path)
         .map_err(|error| journal_error(path, error.to_string()))
 }
 
@@ -756,7 +754,10 @@ fn sidecar_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReliableTransferOutcome, execute_file_reliable};
+    use super::{
+        ReliableFileRequest, ReliableTransferOutcome, execute_file_reliable,
+        execute_file_reliable_request,
+    };
     use cyber_pumpkin_core::{BackendId, BackendPath};
     use cyber_pumpkin_local::LocalBackend;
     use cyber_pumpkin_transfer::{CancellationToken, Endpoint, TransferId};
@@ -776,6 +777,44 @@ mod tests {
 
     fn backend_path(path: &Path) -> Result<BackendPath, Box<dyn std::error::Error>> {
         Ok(BackendPath::new(path.to_string_lossy().into_owned())?)
+    }
+
+    #[test]
+    fn journaled_new_file_commits_and_removes_journal() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temp_root();
+        fs::create_dir(&root)?;
+        let source_path = root.join("source.bin");
+        let destination_path = root.join("destination.bin");
+        let journal_path = root.join("recovery.json");
+        fs::write(&source_path, b"new payload")?;
+        let source_id = BackendId::new("source")?;
+        let destination_id = BackendId::new("destination")?;
+        let source = LocalBackend::new(source_id.clone());
+        let destination = LocalBackend::new(destination_id.clone());
+        let cancellation = CancellationToken::new();
+        let outcome = execute_file_reliable_request(
+            ReliableFileRequest {
+                id: TransferId::new(40)?,
+                source_endpoint: Endpoint {
+                    backend: source_id,
+                    path: backend_path(&source_path)?,
+                },
+                destination_endpoint: Endpoint {
+                    backend: destination_id,
+                    path: backend_path(&destination_path)?,
+                },
+                source: &source,
+                destination: &destination,
+                cancellation: &cancellation,
+                recovery_journal: Some(&journal_path),
+            },
+            |_| {},
+        )?;
+        assert!(matches!(outcome, ReliableTransferOutcome::Completed(_)));
+        assert_eq!(fs::read(&destination_path)?, b"new payload");
+        assert!(!journal_path.exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
